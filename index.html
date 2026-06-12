@@ -29,6 +29,7 @@
         <button @click="activeTab = 'history'" class="btn btn-outline">📜 历史记录</button>
         <button @click="activeTab = 'review'" class="btn btn-outline">🔍 交接复盘</button>
         <button @click="activeTab = 'backup'" class="btn btn-outline">💾 备份恢复</button>
+        <button @click="activeTab = 'checklist'" class="btn btn-outline">✅ 班前检查</button>
         <button @click="showExportExceptionModal = true" class="btn btn-outline">📦 异常交接包</button>
         <button @click="exportHandover" class="btn btn-primary">📤 导出交接单</button>
       </div>
@@ -186,6 +187,7 @@
           <button :class="['config-tab', { active: configTab === 'users' }]" @click="configTab = 'users'">用户配置</button>
           <button :class="['config-tab', { active: configTab === 'templates' }]" @click="configTab = 'templates'">交接模板</button>
           <button :class="['config-tab', { active: configTab === 'current' }]" @click="configTab = 'current'">当前班次</button>
+          <button :class="['config-tab', { active: configTab === 'checklist_tpl' }]" @click="configTab = 'checklist_tpl'">班前检查模板</button>
         </div>
 
         <!-- 班次配置 -->
@@ -305,6 +307,51 @@
             <button @click="saveCurrentShift" class="btn btn-success">保存当前班次设置</button>
             <hr>
             <button @click="createSampleData" class="btn btn-warning">🎯 创建样例数据（用于测试）</button>
+          </div>
+        </div>
+
+        <!-- 班前检查模板配置 -->
+        <div v-if="configTab === 'checklist_tpl'" class="config-panel">
+          <div class="panel-header">
+            <h3>班前检查模板</h3>
+            <button @click="addChecklistTemplate" class="btn btn-primary" v-if="canManageChecklist">+ 新建模板</button>
+          </div>
+          <div v-if="!canManageChecklist" class="alert alert-warning" style="margin-bottom:12px;">
+            仅班长可管理检查模板，值班员和观察员只可执行检查
+          </div>
+          <div class="checklist-template-list">
+            <div v-for="tpl in checklistTemplates" :key="tpl.id" class="checklist-tpl-card">
+              <div class="tpl-card-header">
+                <input v-model="tpl.name" placeholder="模板名称" class="input-text tpl-name-input" :disabled="!canManageChecklist">
+                <button v-if="canManageChecklist" @click="removeChecklistTemplate(tpl.id)" class="btn btn-danger btn-sm">删除模板</button>
+              </div>
+              <div class="tpl-card-body">
+                <div class="form-group" style="margin-bottom:8px;">
+                  <label>适用班次（不选则所有班次通用）：</label>
+                  <div class="tpl-shift-checkboxes">
+                    <label v-for="shift in shifts" :key="shift.id" class="checkbox-label" style="margin-right:12px;">
+                      <input type="checkbox" :value="shift.id" v-model="tpl.shiftIds" :disabled="!canManageChecklist">
+                      {{ shift.name }}
+                    </label>
+                  </div>
+                </div>
+                <div class="tpl-items">
+                  <div v-for="(item, idx) in tpl.items" :key="item.id" class="tpl-item-row">
+                    <label class="checkbox-label" style="min-width:50px;">
+                      <input type="checkbox" v-model="item.required" :disabled="!canManageChecklist"> 必填
+                    </label>
+                    <input v-model="item.name" placeholder="检查项名称" class="input-text" style="flex:1;" :disabled="!canManageChecklist">
+                    <input v-model="item.description" placeholder="说明（可选）" class="input-text input-desc" :disabled="!canManageChecklist">
+                    <button v-if="canManageChecklist" @click="tpl.items.splice(idx, 1)" class="btn btn-danger btn-sm">删</button>
+                  </div>
+                </div>
+                <button v-if="canManageChecklist" @click="addChecklistTemplateItem(tpl)" class="btn btn-outline btn-sm" style="margin-top:6px;">+ 添加检查项</button>
+              </div>
+            </div>
+            <div v-if="checklistTemplates.length === 0" class="empty-state">暂无检查模板，点击上方按钮新建</div>
+          </div>
+          <div class="panel-footer" v-if="canManageChecklist && checklistTemplates.length > 0">
+            <button @click="saveChecklistTemplates" class="btn btn-success">保存模板配置</button>
           </div>
         </div>
       </div>
@@ -592,6 +639,89 @@
                       </span>
                     </div>
                   </div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- 班前检查清单 -->
+      <div v-if="activeTab === 'checklist'" class="checklist-view">
+        <div class="checklist-header">
+          <h2>✅ 班前检查清单</h2>
+          <div class="checklist-actions">
+            <button @click="showGenerateChecklistModal = true" class="btn btn-primary" v-if="canExecuteChecklist">📋 生成检查单</button>
+            <button @click="doExportChecklistJSON" class="btn btn-outline">📤 导出JSON</button>
+            <button @click="doExportChecklistCSV" class="btn btn-outline">📊 导出CSV</button>
+          </div>
+        </div>
+
+        <div v-if="!canExecuteChecklist" class="alert alert-warning" style="margin:12px 0;">
+          观察员无权限执行班前检查，仅可查看记录
+        </div>
+
+        <div class="checklist-content">
+          <div class="checklist-section">
+            <h3>进行中的检查单</h3>
+            <div v-if="myInProgressRecords.length === 0" class="empty-state small">暂无进行中的检查单</div>
+            <div v-for="rec in myInProgressRecords" :key="rec.id" class="checklist-record-card card-in-progress">
+              <div class="record-card-header">
+                <span class="record-tpl-name">{{ rec.templateName }}</span>
+                <span class="record-date">{{ rec.shiftDate }}</span>
+                <span class="record-status status-in-progress">进行中</span>
+              </div>
+              <div class="record-card-body">
+                <div v-for="item in rec.items" :key="item.id" class="checklist-exec-item">
+                  <label class="checkbox-label" :class="{ 'item-disabled': rec.executorId !== currentUserId }">
+                    <input type="checkbox" v-model="item.checked" @change="onChecklistItemChange(rec.id, item)" :disabled="rec.executorId !== currentUserId">
+                    <span :class="{ 'item-required': item.required, 'item-unchecked-required': item.required && !item.checked }">
+                      {{ item.name }}
+                    </span>
+                    <span v-if="item.required" class="required-mark">*必填</span>
+                  </label>
+                  <input v-model="item.remark" @change="onChecklistItemChange(rec.id, item)" placeholder="备注" class="input-text input-remark" :disabled="rec.executorId !== currentUserId">
+                </div>
+              </div>
+              <div class="record-card-footer">
+                <span class="record-progress">已勾选 {{ rec.items.filter(i => i.checked).length }}/{{ rec.items.length }}</span>
+                <button @click="completeChecklistRecord(rec.id)" class="btn btn-success btn-sm" :disabled="rec.executorId !== currentUserId">✅ 完成检查</button>
+              </div>
+            </div>
+          </div>
+
+          <div class="checklist-section">
+            <h3>已完成的检查单</h3>
+            <div v-if="myCompletedRecords.length === 0 && otherCompletedRecords.length === 0" class="empty-state small">暂无已完成的检查单</div>
+            <div v-for="rec in myCompletedRecords" :key="rec.id" class="checklist-record-card card-completed">
+              <div class="record-card-header">
+                <span class="record-tpl-name">{{ rec.templateName }}</span>
+                <span class="record-date">{{ rec.shiftDate }}</span>
+                <span class="record-status status-completed">已完成</span>
+                <span class="record-time">{{ formatIsoTime(rec.completeTime) }}</span>
+              </div>
+              <div class="record-card-body">
+                <div v-for="item in rec.items" :key="item.id" class="checklist-exec-item completed">
+                  <span class="check-result">{{ item.checked ? '✅' : '❌' }}</span>
+                  <span :class="{ 'item-required': item.required }">{{ item.name }}</span>
+                  <span v-if="item.required" class="required-mark">*必填</span>
+                  <span v-if="item.remark" class="item-remark">备注：{{ item.remark }}</span>
+                </div>
+              </div>
+            </div>
+            <div v-for="rec in otherCompletedRecords" :key="rec.id" class="checklist-record-card card-completed card-other">
+              <div class="record-card-header">
+                <span class="record-tpl-name">{{ rec.templateName }}</span>
+                <span class="record-date">{{ rec.shiftDate }}</span>
+                <span class="record-status status-completed">已完成</span>
+                <span class="record-executor">执行人：{{ rec.executorName }}</span>
+                <span class="record-time">{{ formatIsoTime(rec.completeTime) }}</span>
+              </div>
+              <div class="record-card-body">
+                <div v-for="item in rec.items" :key="item.id" class="checklist-exec-item completed">
+                  <span class="check-result">{{ item.checked ? '✅' : '❌' }}</span>
+                  <span :class="{ 'item-required': item.required }">{{ item.name }}</span>
+                  <span v-if="item.remark" class="item-remark">备注：{{ item.remark }}</span>
                 </div>
               </div>
             </div>
@@ -1118,6 +1248,42 @@
           <button v-if="isEditingReview" @click="isEditingReview = false" class="btn btn-outline">取消编辑</button>
           <button v-if="canEditReviewConclusion" @click="deleteReviewCard" class="btn btn-danger">🗑️ 删除复盘卡</button>
           <button @click="showReviewDetailModal = false" class="btn btn-outline">关闭</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- 生成检查单弹窗 -->
+    <div v-if="showGenerateChecklistModal" class="modal-overlay" @click.self="showGenerateChecklistModal = false">
+      <div class="modal">
+        <div class="modal-header">
+          <h3>📋 生成班前检查单</h3>
+          <button @click="showGenerateChecklistModal = false" class="modal-close">×</button>
+        </div>
+        <div class="modal-body">
+          <div class="form-group">
+            <label>选择检查模板：</label>
+            <select v-model="selectedChecklistTemplateId" class="input-select">
+              <option value="">请选择模板</option>
+              <option v-for="tpl in availableChecklistTemplates" :key="tpl.id" :value="tpl.id">{{ tpl.name }}（{{ tpl.items.length }}项）</option>
+            </select>
+          </div>
+          <div v-if="availableChecklistTemplates.length === 0" class="alert alert-warning">
+            当前班次没有可用的检查模板，请先在「配置 → 班前检查模板」中创建
+          </div>
+          <div v-if="selectedChecklistTemplateId" class="form-group">
+            <label>检查项预览：</label>
+            <div class="checklist-preview-items">
+              <div v-for="item in selectedChecklistTemplateItems" :key="item.id" class="checklist-preview-item">
+                <span v-if="item.required" class="required-mark">*必填</span>
+                <span>{{ item.name }}</span>
+                <span v-if="item.description" class="text-muted" style="font-size:12px;"> - {{ item.description }}</span>
+              </div>
+            </div>
+          </div>
+        </div>
+        <div class="modal-footer">
+          <button @click="showGenerateChecklistModal = false" class="btn btn-outline">取消</button>
+          <button @click="generateChecklistRecord" class="btn btn-primary" :disabled="!selectedChecklistTemplateId">生成检查单</button>
         </div>
       </div>
     </div>

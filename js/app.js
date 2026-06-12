@@ -13,6 +13,8 @@ createApp({
     const handoverRecords = ref([]);
     const recoveryLogs = ref([]);
     const reviewCards = ref([]);
+    const checklistTemplates = ref([]);
+    const checklistRecords = ref([]);
 
     const currentShiftId = ref('');
     const currentShiftDate = ref('');
@@ -268,6 +270,8 @@ createApp({
       handoverRecords.value = Store.HandoverRecords.getAll();
       recoveryLogs.value = Store.RecoveryLogs.getAll();
       reviewCards.value = Store.ReviewCards.getAll();
+      checklistTemplates.value = Store.ChecklistTemplates.getAll();
+      checklistRecords.value = Store.ChecklistRecords.getAll();
 
       const currentShiftData = Store.CurrentShift.get();
       currentShiftId.value = currentShiftData.shiftId || '';
@@ -1356,6 +1360,157 @@ createApp({
       });
     });
 
+    // ====== 班前检查清单 ======
+    const showGenerateChecklistModal = ref(false);
+    const selectedChecklistTemplateId = ref('');
+
+    const canManageChecklist = computed(() => {
+      if (!currentUser.value) return false;
+      const role = roles.value.find(r => r.id === currentUser.value.roleId);
+      return role && role.canManageConfig;
+    });
+
+    const canExecuteChecklist = computed(() => {
+      if (!currentUser.value) return false;
+      const role = roles.value.find(r => r.id === currentUser.value.roleId);
+      return role && (role.canConfirm || role.canCreate);
+    });
+
+    const availableChecklistTemplates = computed(() => {
+      if (!currentShiftId.value) return [];
+      return Store.ChecklistTemplates.getByShiftId(currentShiftId.value);
+    });
+
+    const selectedChecklistTemplateItems = computed(() => {
+      if (!selectedChecklistTemplateId.value) return [];
+      const tpl = checklistTemplates.value.find(t => t.id === selectedChecklistTemplateId.value);
+      return tpl ? tpl.items : [];
+    });
+
+    const myInProgressRecords = computed(() => {
+      if (!currentUserId.value) return [];
+      return checklistRecords.value.filter(r => r.executorId === currentUserId.value && r.status === 'in_progress');
+    });
+
+    const myCompletedRecords = computed(() => {
+      if (!currentUserId.value) return [];
+      return checklistRecords.value.filter(r => r.executorId === currentUserId.value && r.status === 'completed');
+    });
+
+    const otherCompletedRecords = computed(() => {
+      if (!currentUserId.value) return [];
+      return checklistRecords.value.filter(r => r.executorId !== currentUserId.value && r.status === 'completed');
+    });
+
+    function addChecklistTemplate() {
+      const result = Store.ChecklistTemplates.create({
+        name: '新检查模板',
+        shiftIds: [],
+        items: [
+          { name: '机房环境巡检', required: true, description: '' },
+          { name: '监控告警检查', required: true, description: '' }
+        ]
+      });
+      if (result.success) {
+        checklistTemplates.value = Store.ChecklistTemplates.getAll();
+        showToast('已新建模板', 'success');
+      }
+    }
+
+    function addChecklistTemplateItem(tpl) {
+      tpl.items.push({ id: Store.generateId('cli'), name: '', required: false, description: '' });
+    }
+
+    function removeChecklistTemplate(id) {
+      Store.ChecklistTemplates.remove(id);
+      checklistTemplates.value = Store.ChecklistTemplates.getAll();
+      showToast('模板已删除', 'success');
+    }
+
+    function saveChecklistTemplates() {
+      Store.ChecklistTemplates.saveAll(checklistTemplates.value);
+      showToast('模板配置已保存', 'success');
+    }
+
+    function generateChecklistRecord() {
+      if (!selectedChecklistTemplateId.value) {
+        showToast('请选择检查模板', 'warning');
+        return;
+      }
+      const user = users.value.find(u => u.id === currentUserId.value);
+      const result = Store.ChecklistRecords.generate(
+        selectedChecklistTemplateId.value,
+        user,
+        currentShiftId.value,
+        currentShiftDate.value
+      );
+      if (!result.success) {
+        showToast(result.error, 'error');
+        return;
+      }
+      showGenerateChecklistModal.value = false;
+      selectedChecklistTemplateId.value = '';
+      checklistRecords.value = Store.ChecklistRecords.getAll();
+      showToast('检查单已生成', 'success');
+    }
+
+    function onChecklistItemChange(recordId, item) {
+      const user = users.value.find(u => u.id === currentUserId.value);
+      Store.ChecklistRecords.checkItem(recordId, item.id, item.checked, item.remark, user);
+    }
+
+    function completeChecklistRecord(recordId) {
+      const user = users.value.find(u => u.id === currentUserId.value);
+      const result = Store.ChecklistRecords.complete(recordId, user);
+      if (!result.success) {
+        showToast(result.error, 'error');
+        return;
+      }
+      checklistRecords.value = Store.ChecklistRecords.getAll();
+      recoveryLogs.value = Store.RecoveryLogs.getAll();
+      showToast('检查单已完成，已写入操作日志', 'success');
+    }
+
+    function doExportChecklistJSON() {
+      const result = Store.ChecklistRecords.exportJSON();
+      if (!result.success) {
+        showToast(result.error, 'warning');
+        return;
+      }
+      const jsonStr = JSON.stringify(result.data, null, 2);
+      const blob = new Blob([jsonStr], { type: 'application/json' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      const dateStr = new Date().toISOString().slice(0, 10).replace(/-/g, '');
+      a.download = `checklist-records-${dateStr}.json`;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+      showToast(`已导出 ${result.count} 条检查记录(JSON)`, 'success');
+    }
+
+    function doExportChecklistCSV() {
+      const result = Store.ChecklistRecords.exportCSV();
+      if (!result.success) {
+        showToast(result.error, 'warning');
+        return;
+      }
+      const BOM = '\uFEFF';
+      const blob = new Blob([BOM + result.csv], { type: 'text/csv;charset=utf-8' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      const dateStr = new Date().toISOString().slice(0, 10).replace(/-/g, '');
+      a.download = `checklist-records-${dateStr}.csv`;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+      showToast(`已导出 ${result.count} 条检查记录(CSV)`, 'success');
+    }
+
     // ====== 异常交接包 ======
     const showExportExceptionModal = ref(false);
     const exceptionSelectedItemIds = ref([]);
@@ -1506,6 +1661,8 @@ createApp({
       handoverRecords,
       recoveryLogs,
       reviewCards,
+      checklistTemplates,
+      checklistRecords,
       currentShiftId,
       currentShiftDate,
       handoverUserId,
@@ -1547,6 +1704,25 @@ createApp({
       pendingConfirmItems,
       currentDataVersion,
       currentSummary,
+
+      canManageChecklist,
+      canExecuteChecklist,
+      showGenerateChecklistModal,
+      selectedChecklistTemplateId,
+      availableChecklistTemplates,
+      selectedChecklistTemplateItems,
+      myInProgressRecords,
+      myCompletedRecords,
+      otherCompletedRecords,
+      addChecklistTemplate,
+      addChecklistTemplateItem,
+      removeChecklistTemplate,
+      saveChecklistTemplates,
+      generateChecklistRecord,
+      onChecklistItemChange,
+      completeChecklistRecord,
+      doExportChecklistJSON,
+      doExportChecklistCSV,
 
       showExportExceptionModal,
       exceptionSelectedItemIds,

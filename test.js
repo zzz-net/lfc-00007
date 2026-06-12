@@ -2520,6 +2520,241 @@ test('冲突场景 - 同编号版本不同 / 本地有更新，导入被跳过',
   assert(finalItem.version === localVersionAfter, '本地版本号应保持不变');
 });
 
+console.log('\n--- 10. 班前检查清单模块测试 ---\n');
+
+localStorage.clear();
+Store.createSampleData();
+
+const cltTplResult = Store.ChecklistTemplates.create({
+  name: '通用班前检查',
+  shiftIds: [],
+  items: [
+    { name: '机房环境巡检', required: true, description: '温度湿度检查' },
+    { name: '监控告警检查', required: true, description: '未处理告警' },
+    { name: '备份任务检查', required: false, description: '昨日备份' },
+    { name: '工单积压检查', required: true, description: '积压工单' }
+  ]
+});
+
+test('检查清单模板 - 创建与字段完整性', () => {
+  assert(cltTplResult.success === true, '创建模板应成功');
+  const tpl = cltTplResult.template;
+  assert(tpl.id, '模板应有 id');
+  assert(tpl.name === '通用班前检查', `模板名称应为"通用班前检查"，实际"${tpl.name}"`);
+  assert(tpl.shiftIds.length === 0, '未指定班次时应为空数组');
+  assert(tpl.items.length === 4, `应有 4 个检查项，实际 ${tpl.items.length}`);
+  assert(tpl.items[0].required === true, '第一项应为必填');
+  assert(tpl.items[2].required === false, '第三项应为非必填');
+  assert(tpl.createTime, '应有创建时间');
+  assert(tpl.updateTime, '应有更新时间');
+});
+
+test('检查清单模板 - 查询与按班次筛选', () => {
+  const all = Store.ChecklistTemplates.getAll();
+  assert(all.length >= 2, `至少应有 2 个模板（样例+新建），实际 ${all.length}`);
+
+  const byId = Store.ChecklistTemplates.getById(cltTplResult.template.id);
+  assert(byId !== null, '按 ID 应能查到模板');
+  assert(byId.name === '通用班前检查', '查到的模板名称应一致');
+
+  const morningTpls = Store.ChecklistTemplates.getByShiftId('shift_morning');
+  assert(morningTpls.length >= 1, '白班应有可用模板（通用模板适用所有班次）');
+});
+
+test('检查清单模板 - 更新与删除', () => {
+  const updateResult = Store.ChecklistTemplates.update(cltTplResult.template.id, {
+    name: '通用班前检查（修改后）',
+    shiftIds: ['shift_morning']
+  });
+  assert(updateResult.success === true, '更新模板应成功');
+  assert(updateResult.template.name === '通用班前检查（修改后）', '更新后名称应改变');
+
+  const delResult = Store.ChecklistTemplates.remove('nonexistent_id');
+  assert(delResult.success === false, '删除不存在的模板应失败');
+  assert(delResult.error === '模板不存在', '应返回模板不存在错误');
+
+  const dupTpl = Store.ChecklistTemplates.create({ name: '待删除模板', shiftIds: [], items: [] });
+  const delOk = Store.ChecklistTemplates.remove(dupTpl.template.id);
+  assert(delOk.success === true, '删除已有模板应成功');
+  assert(Store.ChecklistTemplates.getById(dupTpl.template.id) === null, '删除后按 ID 应查不到');
+});
+
+const cltUser = Store.Users.getById('user_zhang');
+const cltObserver = Store.Users.getById('user_zhao');
+const cltOperator = Store.Users.getById('user_li');
+
+test('生成检查单 - 正常生成与字段验证', () => {
+  const result = Store.ChecklistRecords.generate(
+    cltTplResult.template.id, cltUser, 'shift_morning', '2026-06-13'
+  );
+  assert(result.success === true, '生成检查单应成功');
+  const rec = result.record;
+  assert(rec.id, '检查单应有 id');
+  assert(rec.templateId === cltTplResult.template.id, '模板 ID 应一致');
+  assert(rec.templateName === '通用班前检查（修改后）', '模板名称应一致');
+  assert(rec.shiftId === 'shift_morning', '班次 ID 应一致');
+  assert(rec.shiftDate === '2026-06-13', '日期应一致');
+  assert(rec.executorId === 'user_zhang', '执行人 ID 应一致');
+  assert(rec.executorName === '张三', '执行人名称应一致');
+  assert(rec.status === 'in_progress', '初始状态应为 in_progress');
+  assert(rec.items.length === 4, '检查项数量应与模板一致');
+  assert(rec.items[0].checked === false, '检查项初始应未勾选');
+  assert(rec.completeTime === null, '完成时间应为 null');
+});
+
+test('生成检查单 - 权限拦截（观察员无权限）', () => {
+  const result = Store.ChecklistRecords.generate(
+    cltTplResult.template.id, cltObserver, 'shift_morning', '2026-06-13'
+  );
+  assert(result.success === false, '观察员生成检查单应失败');
+  assert(result.error.includes('无权限'), `错误应包含"无权限"，实际"${result.error}"`);
+});
+
+test('生成检查单 - 重复生成当天同一模板应被拦截', () => {
+  const result = Store.ChecklistRecords.generate(
+    cltTplResult.template.id, cltUser, 'shift_morning', '2026-06-13'
+  );
+  assert(result.success === false, '重复生成应失败');
+  assert(result.error.includes('重复'), `错误应包含"重复"，实际"${result.error}"`);
+});
+
+test('生成检查单 - 模板被删除时生成应提示', () => {
+  const tmpTpl = Store.ChecklistTemplates.create({ name: '临时模板', shiftIds: [], items: [{ name: '测试项', required: true }] });
+  Store.ChecklistTemplates.remove(tmpTpl.template.id);
+  const result = Store.ChecklistRecords.generate(
+    tmpTpl.template.id, cltUser, 'shift_morning', '2026-06-13'
+  );
+  assert(result.success === false, '模板删除后生成应失败');
+  assert(result.error.includes('已被删除'), `错误应包含"已被删除"，实际"${result.error}"`);
+});
+
+test('勾选检查项 - 正常勾选与备注', () => {
+  const records = Store.ChecklistRecords.getAll();
+  const myRec = records.find(r => r.executorId === 'user_zhang' && r.status === 'in_progress');
+  assert(myRec, '应能找到进行中的检查单');
+
+  const checkResult = Store.ChecklistRecords.checkItem(myRec.id, myRec.items[0].id, true, '温度正常', cltUser);
+  assert(checkResult.success === true, '勾选应成功');
+  assert(checkResult.item.checked === true, '勾选后应为 true');
+  assert(checkResult.item.remark === '温度正常', '备注应保存');
+
+  const refreshed = Store.ChecklistRecords.getById(myRec.id);
+  assert(refreshed.items[0].checked === true, '刷新后勾选状态应保持');
+});
+
+test('勾选检查项 - 非本人不能修改', () => {
+  const records = Store.ChecklistRecords.getAll();
+  const myRec = records.find(r => r.executorId === 'user_zhang' && r.status === 'in_progress');
+  const checkResult = Store.ChecklistRecords.checkItem(myRec.id, myRec.items[1].id, true, '', cltOperator);
+  assert(checkResult.success === false, '非本人勾选应失败');
+  assert(checkResult.error.includes('只能修改自己的'), `错误应包含"只能修改自己的"，实际"${checkResult.error}"`);
+});
+
+test('完成检查单 - 必填项未完成时不能完成', () => {
+  const records = Store.ChecklistRecords.getAll();
+  const myRec = records.find(r => r.executorId === 'user_zhang' && r.status === 'in_progress');
+  const result = Store.ChecklistRecords.complete(myRec.id, cltUser);
+  assert(result.success === false, '必填项未完成时应失败');
+  assert(result.error.includes('必填项未完成'), `错误应包含"必填项未完成"，实际"${result.error}"`);
+  assert(result.uncheckedItems && result.uncheckedItems.length > 0, '应返回未完成的必填项列表');
+});
+
+test('完成检查单 - 全部必填项勾选后完成，写入恢复日志', () => {
+  const records = Store.ChecklistRecords.getAll();
+  const myRec = records.find(r => r.executorId === 'user_zhang' && r.status === 'in_progress');
+
+  Store.ChecklistRecords.checkItem(myRec.id, myRec.items[1].id, true, '无告警', cltUser);
+  Store.ChecklistRecords.checkItem(myRec.id, myRec.items[3].id, true, '', cltUser);
+
+  const result = Store.ChecklistRecords.complete(myRec.id, cltUser);
+  assert(result.success === true, '全部必填项勾选后应完成');
+  assert(result.record.status === 'completed', '状态应为 completed');
+  assert(result.record.completeTime !== null, '完成时间应不为 null');
+
+  const logs = Store.RecoveryLogs.getAll();
+  const checkLog = logs.find(l => l.action === '完成班前检查' && l.checklistRecordId === myRec.id);
+  assert(checkLog, '应写入完成班前检查的恢复日志');
+  assert(checkLog.operatorName === '张三', '日志操作人应为张三');
+  assert(checkLog.templateName === '通用班前检查（修改后）', '日志模板名称应正确');
+  assert(checkLog.succeeded === true, '日志应标记成功');
+  assert(checkLog.totalItems === 4, `日志总项数应为 4，实际 ${checkLog.totalItems}`);
+});
+
+test('完成检查单 - 已完成后不能再修改', () => {
+  const records = Store.ChecklistRecords.getAll();
+  const completedRec = records.find(r => r.executorId === 'user_zhang' && r.status === 'completed');
+  const checkResult = Store.ChecklistRecords.checkItem(completedRec.id, completedRec.items[2].id, true, '', cltUser);
+  assert(checkResult.success === false, '已完成检查单不应再修改');
+  assert(checkResult.error.includes('已完成'), `错误应包含"已完成"，实际"${checkResult.error}"`);
+});
+
+test('刷新页面后数据持久化', () => {
+  const allBefore = Store.ChecklistRecords.getAll();
+  const completedBefore = allBefore.filter(r => r.status === 'completed');
+  assert(completedBefore.length >= 1, '至少应有 1 条已完成记录');
+
+  const raw = localStorage.getItem('handover_checklist_records');
+  assert(raw !== null, 'localStorage 应有 checklist_records 数据');
+  const parsed = JSON.parse(raw);
+  const completedFromStorage = parsed.filter(r => r.status === 'completed');
+  assert(completedFromStorage.length === completedBefore.length, 'localStorage 中已完成记录数量应一致');
+
+  const tplRaw = localStorage.getItem('handover_checklist_templates');
+  assert(tplRaw !== null, 'localStorage 应有 checklist_templates 数据');
+});
+
+test('导出 JSON - 正常导出与字段完整性', () => {
+  const result = Store.ChecklistRecords.exportJSON();
+  assert(result.success === true, '导出 JSON 应成功');
+  assert(result.count >= 1, `至少应有 1 条导出记录，实际 ${result.count}`);
+  const first = result.data[0];
+  assert(first.recordId, '导出应有 recordId');
+  assert(first.templateName, '导出应有 templateName');
+  assert(first.shiftDate, '导出应有 shiftDate');
+  assert(first.executorName, '导出应有 executorName');
+  assert(first.completeTime, '导出应有 completeTime');
+  assert(Array.isArray(first.failedItems), '导出应有 failedItems 数组');
+  assert(Array.isArray(first.items), '导出应有 items 数组');
+});
+
+test('导出 CSV - 正常导出', () => {
+  const result = Store.ChecklistRecords.exportCSV();
+  assert(result.success === true, '导出 CSV 应成功');
+  assert(result.csv.includes('班次日期'), 'CSV 应包含表头');
+  assert(result.csv.includes('通用班前检查'), 'CSV 应包含模板名称');
+  assert(result.csv.includes('张三'), 'CSV 应包含执行人');
+});
+
+test('导出空记录 - 无记录时明确提示', () => {
+  localStorage.clear();
+  Store.createSampleData();
+  const result = Store.ChecklistRecords.exportJSON();
+  assert(result.success === false, '无记录时导出应失败');
+  assert(result.error.includes('没有可导出的检查记录'), `错误应为"没有可导出的检查记录"，实际"${result.error}"`);
+
+  const csvResult = Store.ChecklistRecords.exportCSV();
+  assert(csvResult.success === false, '无记录时 CSV 导出也应失败');
+});
+
+test('查询 - 按用户和按班次筛选', () => {
+  localStorage.clear();
+  Store.createSampleData();
+  const tpl = Store.ChecklistTemplates.create({
+    name: '查询测试模板', shiftIds: [], items: [
+      { name: '项1', required: true },
+      { name: '项2', required: false }
+    ]
+  });
+  const user = Store.Users.getById('user_li');
+  Store.ChecklistRecords.generate(tpl.template.id, user, 'shift_morning', '2026-06-13');
+
+  const byUser = Store.ChecklistRecords.getByUser('user_li');
+  assert(byUser.length >= 1, '按用户查询应至少有 1 条');
+
+  const byShift = Store.ChecklistRecords.getByShift('shift_morning', '2026-06-13');
+  assert(byShift.length >= 1, '按班次查询应至少有 1 条');
+});
+
 console.log('\n=== 测试结果总结 ===');
 console.log(`通过: ${passed}`);
 console.log(`失败: ${failed}`);

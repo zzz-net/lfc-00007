@@ -10,7 +10,9 @@ const Store = (function() {
     CURRENT_USER_ID: 'handover_current_user',
     RECOVERY_LOGS: 'handover_recovery_logs',
     REVIEW_CARDS: 'handover_review_cards',
-    REVIEW_FILTERS: 'handover_review_filters'
+    REVIEW_FILTERS: 'handover_review_filters',
+    CHECKLIST_TEMPLATES: 'handover_checklist_templates',
+    CHECKLIST_RECORDS: 'handover_checklist_records'
   };
 
   const CURRENT_DATA_VERSION = '1.1';
@@ -796,6 +798,226 @@ const Store = (function() {
     }
   };
 
+  const ChecklistTemplates = {
+    getAll() {
+      return getFromStorage(STORAGE_KEYS.CHECKLIST_TEMPLATES, []);
+    },
+    saveAll(templates) {
+      return saveToStorage(STORAGE_KEYS.CHECKLIST_TEMPLATES, templates);
+    },
+    getById(id) {
+      return this.getAll().find(t => t.id === id) || null;
+    },
+    create(template) {
+      const templates = this.getAll();
+      const newTemplate = {
+        id: generateId('clt'),
+        name: template.name || '',
+        shiftIds: template.shiftIds || [],
+        items: (template.items || []).map(it => ({
+          id: generateId('cli'),
+          name: it.name || '',
+          required: !!it.required,
+          description: it.description || ''
+        })),
+        createTime: new Date().toISOString(),
+        updateTime: new Date().toISOString()
+      };
+      templates.push(newTemplate);
+      this.saveAll(templates);
+      return { success: true, template: newTemplate };
+    },
+    update(id, data) {
+      const templates = this.getAll();
+      const idx = templates.findIndex(t => t.id === id);
+      if (idx === -1) return { success: false, error: '模板不存在' };
+      if (data.name !== undefined) templates[idx].name = data.name;
+      if (data.shiftIds !== undefined) templates[idx].shiftIds = data.shiftIds;
+      if (data.items !== undefined) {
+        templates[idx].items = data.items.map(it => ({
+          id: it.id || generateId('cli'),
+          name: it.name || '',
+          required: !!it.required,
+          description: it.description || ''
+        }));
+      }
+      templates[idx].updateTime = new Date().toISOString();
+      this.saveAll(templates);
+      return { success: true, template: templates[idx] };
+    },
+    remove(id) {
+      const templates = this.getAll();
+      const filtered = templates.filter(t => t.id !== id);
+      if (filtered.length === templates.length) return { success: false, error: '模板不存在' };
+      this.saveAll(filtered);
+      return { success: true };
+    },
+    getByShiftId(shiftId) {
+      return this.getAll().filter(t => !t.shiftIds || t.shiftIds.length === 0 || t.shiftIds.includes(shiftId));
+    }
+  };
+
+  const ChecklistRecords = {
+    getAll() {
+      return getFromStorage(STORAGE_KEYS.CHECKLIST_RECORDS, []);
+    },
+    saveAll(records) {
+      return saveToStorage(STORAGE_KEYS.CHECKLIST_RECORDS, records);
+    },
+    getById(id) {
+      return this.getAll().find(r => r.id === id) || null;
+    },
+    generate(templateId, user, shiftId, shiftDate) {
+      if (!user || !user.id) {
+        return { success: false, error: '请先选择当前用户' };
+      }
+      const role = Roles.getById(user.roleId);
+      if (!role || (!role.canConfirm && !role.canCreate)) {
+        return { success: false, error: '当前用户无权限执行班前检查' };
+      }
+      const template = ChecklistTemplates.getById(templateId);
+      if (!template) {
+        return { success: false, error: '检查清单模板已被删除，无法生成检查单' };
+      }
+      const existing = this.getAll().find(r =>
+        r.templateId === templateId &&
+        r.executorId === user.id &&
+        r.shiftId === shiftId &&
+        r.shiftDate === shiftDate
+      );
+      if (existing) {
+        return { success: false, error: '当天已生成过该模板的检查单，不能重复生成', existingId: existing.id };
+      }
+      const records = this.getAll();
+      const newRecord = {
+        id: generateId('clr'),
+        templateId,
+        templateName: template.name,
+        shiftId,
+        shiftDate,
+        executorId: user.id,
+        executorName: user.name,
+        executorRoleId: user.roleId,
+        executorRoleName: role ? role.name : '',
+        items: template.items.map(it => ({
+          id: it.id,
+          name: it.name,
+          required: it.required,
+          description: it.description || '',
+          checked: false,
+          remark: ''
+        })),
+        status: 'in_progress',
+        createTime: new Date().toISOString(),
+        completeTime: null
+      };
+      records.push(newRecord);
+      this.saveAll(records);
+      return { success: true, record: newRecord };
+    },
+    checkItem(recordId, itemId, checked, remark, user) {
+      const records = this.getAll();
+      const record = records.find(r => r.id === recordId);
+      if (!record) return { success: false, error: '检查单不存在' };
+      if (record.status !== 'in_progress') return { success: false, error: '检查单已完成，不能再修改' };
+      if (record.executorId !== (user && user.id)) return { success: false, error: '只能修改自己的检查单' };
+      const item = record.items.find(it => it.id === itemId);
+      if (!item) return { success: false, error: '检查项不存在' };
+      item.checked = !!checked;
+      if (remark !== undefined) item.remark = remark;
+      this.saveAll(records);
+      return { success: true, item };
+    },
+    complete(recordId, user) {
+      const records = this.getAll();
+      const record = records.find(r => r.id === recordId);
+      if (!record) return { success: false, error: '检查单不存在' };
+      if (record.status !== 'in_progress') return { success: false, error: '检查单已完成' };
+      if (record.executorId !== (user && user.id)) return { success: false, error: '只能完成自己的检查单' };
+      const unchecked = record.items.filter(it => it.required && !it.checked);
+      if (unchecked.length > 0) {
+        return {
+          success: false,
+          error: `还有 ${unchecked.length} 个必填项未完成：${unchecked.map(it => it.name).join('、')}`,
+          uncheckedItems: unchecked
+        };
+      }
+      record.status = 'completed';
+      record.completeTime = new Date().toISOString();
+      this.saveAll(records);
+      RecoveryLogs.add({
+        action: '完成班前检查',
+        operatorId: user.id,
+        operatorName: user.name,
+        checklistRecordId: recordId,
+        templateName: record.templateName,
+        shiftDate: record.shiftDate,
+        totalItems: record.items.length,
+        failedItems: record.items.filter(it => !it.checked).map(it => it.name),
+        succeeded: true
+      });
+      return { success: true, record };
+    },
+    getByUser(userId) {
+      return this.getAll().filter(r => r.executorId === userId);
+    },
+    getByShift(shiftId, shiftDate) {
+      return this.getAll().filter(r => r.shiftId === shiftId && r.shiftDate === shiftDate);
+    },
+    exportJSON(filters) {
+      let records = this.getAll();
+      if (filters) {
+        if (filters.shiftId) records = records.filter(r => r.shiftId === filters.shiftId);
+        if (filters.startDate) records = records.filter(r => r.shiftDate >= filters.startDate);
+        if (filters.endDate) records = records.filter(r => r.shiftDate <= filters.endDate);
+        if (filters.status) records = records.filter(r => r.status === filters.status);
+      }
+      if (records.length === 0) {
+        return { success: false, error: '没有可导出的检查记录' };
+      }
+      const exportData = records.map(r => ({
+        recordId: r.id,
+        templateName: r.templateName,
+        shiftId: r.shiftId,
+        shiftDate: r.shiftDate,
+        executorName: r.executorName,
+        executorRoleName: r.executorRoleName,
+        status: r.status,
+        createTime: r.createTime,
+        completeTime: r.completeTime,
+        totalItems: r.items.length,
+        checkedItems: r.items.filter(it => it.checked).length,
+        failedItems: r.items.filter(it => !it.checked).map(it => ({ name: it.name, required: it.required, remark: it.remark })),
+        items: r.items.map(it => ({ name: it.name, required: it.required, checked: it.checked, remark: it.remark }))
+      }));
+      return { success: true, data: exportData, count: exportData.length };
+    },
+    exportCSV(filters) {
+      const jsonResult = this.exportJSON(filters);
+      if (!jsonResult.success) return jsonResult;
+      const header = '班次日期,班次ID,模板名称,执行人,角色,状态,完成时间,总项数,通过项数,未通过项,备注';
+      const rows = jsonResult.data.map(r => {
+        const failedNames = r.failedItems.map(f => f.name + (f.remark ? '(' + f.remark + ')' : '')).join('; ');
+        const statusText = r.status === 'completed' ? '已完成' : '进行中';
+        const allRemarks = r.items.filter(it => it.remark).map(it => it.name + ':' + it.remark).join('; ');
+        return [
+          r.shiftDate,
+          r.shiftId,
+          '"' + (r.templateName || '').replace(/"/g, '""') + '"',
+          r.executorName,
+          r.executorRoleName,
+          statusText,
+          r.completeTime || '',
+          r.totalItems,
+          r.checkedItems,
+          '"' + failedNames.replace(/"/g, '""') + '"',
+          '"' + (allRemarks || '').replace(/"/g, '""') + '"'
+        ].join(',');
+      });
+      return { success: true, csv: header + '\n' + rows.join('\n'), count: jsonResult.count };
+    }
+  };
+
   const ReviewCards = {
     getAll() {
       const raw = getFromStorage(STORAGE_KEYS.REVIEW_CARDS, []);
@@ -1064,6 +1286,38 @@ const Store = (function() {
       assigneeId: 'user_wang',
       assigneeName: '王五'
     }, creator);
+
+    ChecklistTemplates.saveAll([
+      {
+        id: 'clt_sample1',
+        name: '标准班前检查',
+        shiftIds: [],
+        items: [
+          { id: 'cli_s1', name: '机房环境巡检', required: true, description: '温度、湿度、空调运行状态' },
+          { id: 'cli_s2', name: '监控告警检查', required: true, description: '检查监控平台是否有未处理告警' },
+          { id: 'cli_s3', name: '备份任务检查', required: true, description: '检查昨日备份任务是否成功完成' },
+          { id: 'cli_s4', name: '工单积压检查', required: true, description: '检查是否有未处理的积压工单' },
+          { id: 'cli_s5', name: '网络连通性检查', required: false, description: '核心网络设备连通性测试' },
+          { id: 'cli_s6', name: '值班日志准备', required: true, description: '确认值班日志已准备就绪' }
+        ],
+        createTime: new Date().toISOString(),
+        updateTime: new Date().toISOString()
+      },
+      {
+        id: 'clt_sample2',
+        name: '夜班专项检查',
+        shiftIds: ['shift_night'],
+        items: [
+          { id: 'cli_n1', name: '夜间告警值守确认', required: true, description: '确认夜间告警通知渠道畅通' },
+          { id: 'cli_n2', name: '无人值守系统状态', required: true, description: '检查无人值守系统运行状态' },
+          { id: 'cli_n3', name: '安全门禁检查', required: false, description: '确认机房门禁系统正常' }
+        ],
+        createTime: new Date().toISOString(),
+        updateTime: new Date().toISOString()
+      }
+    ]);
+
+    ChecklistRecords.saveAll([]);
 
     return true;
   }
@@ -1498,6 +1752,8 @@ const Store = (function() {
     RecoveryLogs,
     ReviewCards,
     ReviewFilters,
+    ChecklistTemplates,
+    ChecklistRecords,
     createSampleData,
     exportAllData,
     validateImportStructure,
