@@ -663,9 +663,50 @@ const Store = (function() {
       handoverRecords: HandoverRecords.getAll(),
       recoveryLogs: RecoveryLogs.getAll(),
       reviewCards: ReviewCards.getAll(),
+      reviewFilters: ReviewFilters.get(),
       exportTime: new Date().toISOString(),
       version: CURRENT_DATA_VERSION
     };
+  }
+
+  const VALID_REVIEW_FILTER_FIELDS = ['hasRisk', 'noRisk', 'myResponsible', 'overdue'];
+
+  function validateReviewFilters(filters) {
+    const errors = [];
+    if (filters === undefined || filters === null) {
+      return { valid: false, errors: ['筛选配置为空'] };
+    }
+    if (typeof filters !== 'object') {
+      return { valid: false, errors: ['筛选配置应为对象'] };
+    }
+    for (const key of Object.keys(filters)) {
+      if (!VALID_REVIEW_FILTER_FIELDS.includes(key)) {
+        errors.push(`未知筛选字段: ${key}`);
+      }
+      if (typeof filters[key] !== 'boolean') {
+        errors.push(`筛选字段 ${key} 应为布尔值`);
+      }
+    }
+    return { valid: errors.length === 0, errors };
+  }
+
+  function migrateReviewFilters(filters) {
+    const defaultFilters = {
+      hasRisk: false,
+      noRisk: false,
+      myResponsible: false,
+      overdue: false
+    };
+    if (!filters || typeof filters !== 'object') {
+      return { ...defaultFilters };
+    }
+    const migrated = { ...defaultFilters };
+    for (const key of VALID_REVIEW_FILTER_FIELDS) {
+      if (key in filters && typeof filters[key] === 'boolean') {
+        migrated[key] = filters[key];
+      }
+    }
+    return migrated;
   }
 
   function validateImportStructure(data) {
@@ -691,6 +732,15 @@ const Store = (function() {
 
     if ('currentShift' in data && typeof data.currentShift !== 'object') {
       errors.push('字段 currentShift 应为对象');
+    }
+
+    if ('reviewFilters' in data) {
+      const filterValidation = validateReviewFilters(data.reviewFilters);
+      if (!filterValidation.valid) {
+        filterValidation.errors.forEach(err => {
+          errors.push(`筛选配置: ${err}`);
+        });
+      }
     }
 
     return { valid: errors.length === 0, errors };
@@ -755,7 +805,15 @@ const Store = (function() {
     const conflicts = {
       shiftNames: [],
       userNames: [],
-      unclosedItemIds: []
+      unclosedItemIds: [],
+      reviewFilters: {
+        hasConflict: false,
+        importHasFilters: false,
+        currentHasFilters: true,
+        changedFields: [],
+        importFilters: null,
+        currentFilters: null
+      }
     };
 
     if (importData.shifts) {
@@ -798,9 +856,29 @@ const Store = (function() {
       });
     }
 
+    if (importData.reviewFilters !== undefined) {
+      conflicts.reviewFilters.importHasFilters = true;
+      const importFilters = migrateReviewFilters(importData.reviewFilters);
+      const currentFilters = ReviewFilters.get();
+      conflicts.reviewFilters.importFilters = importFilters;
+      conflicts.reviewFilters.currentFilters = currentFilters;
+
+      const changedFields = [];
+      for (const key of VALID_REVIEW_FILTER_FIELDS) {
+        if (importFilters[key] !== currentFilters[key]) {
+          changedFields.push(key);
+        }
+      }
+      if (changedFields.length > 0) {
+        conflicts.reviewFilters.hasConflict = true;
+        conflicts.reviewFilters.changedFields = changedFields;
+      }
+    }
+
     const hasConflicts = conflicts.shiftNames.length > 0 || 
                          conflicts.userNames.length > 0 || 
-                         conflicts.unclosedItemIds.length > 0;
+                         conflicts.unclosedItemIds.length > 0 ||
+                         conflicts.reviewFilters.hasConflict;
 
     return { hasConflicts, conflicts };
   }
@@ -815,6 +893,8 @@ const Store = (function() {
       handoverRecords: importData.handoverRecords ? importData.handoverRecords.length : 0,
       recoveryLogs: importData.recoveryLogs ? importData.recoveryLogs.length : 0,
       reviewCards: importData.reviewCards ? importData.reviewCards.length : 0,
+      reviewFilters: importData.reviewFilters ? migrateReviewFilters(importData.reviewFilters) : null,
+      hasReviewFilters: !!importData.reviewFilters,
       exportTime: importData.exportTime,
       version: importData.version
     };
@@ -830,6 +910,7 @@ const Store = (function() {
       handoverRecords: HandoverRecords.getAll().length,
       recoveryLogs: RecoveryLogs.getAll().length,
       reviewCards: ReviewCards.getAll().length,
+      reviewFilters: ReviewFilters.get(),
       version: CURRENT_DATA_VERSION
     };
   }
@@ -847,7 +928,22 @@ const Store = (function() {
       if (diff !== 0) totalChanges++;
     });
 
-    return { differences, totalChanges };
+    const importFilters = importSummary.reviewFilters;
+    const currentFilters = currentSummary.reviewFilters;
+    const hasImportFilters = importSummary.hasReviewFilters;
+    let filtersChanged = false;
+    if (hasImportFilters && currentFilters) {
+      for (const key of VALID_REVIEW_FILTER_FIELDS) {
+        if (importFilters[key] !== currentFilters[key]) {
+          filtersChanged = true;
+          break;
+        }
+      }
+    } else if (hasImportFilters && !currentFilters) {
+      filtersChanged = true;
+    }
+
+    return { differences, totalChanges, filtersChanged, importFilters, currentFilters, hasImportFilters };
   }
 
   function previewImport(data) {
@@ -874,7 +970,14 @@ const Store = (function() {
       differences: diffResult.differences,
       totalChanges: diffResult.totalChanges,
       conflicts: conflictResult.conflicts,
-      hasConflicts: conflictResult.hasConflicts
+      hasConflicts: conflictResult.hasConflicts,
+      reviewFilters: {
+        importHasFilters: diffResult.hasImportFilters,
+        importFilters: diffResult.importFilters,
+        currentFilters: diffResult.currentFilters,
+        filtersChanged: diffResult.filtersChanged,
+        conflictInfo: conflictResult.conflicts.reviewFilters
+      }
     };
   }
 
@@ -920,7 +1023,23 @@ const Store = (function() {
       if (data.recoveryLogs) RecoveryLogs.saveAll(data.recoveryLogs);
       if (data.reviewCards) ReviewCards.saveAll(data.reviewCards);
 
+      let reviewFiltersRestoreInfo = {
+        restored: false,
+        importHasFilters: false,
+        beforeFilters: beforeSummary.reviewFilters,
+        afterFilters: null,
+        changedFields: []
+      };
+      if (data.reviewFilters !== undefined) {
+        reviewFiltersRestoreInfo.importHasFilters = true;
+        const migratedFilters = migrateReviewFilters(data.reviewFilters);
+        ReviewFilters.save(migratedFilters);
+        reviewFiltersRestoreInfo.restored = true;
+        reviewFiltersRestoreInfo.changedFields = preview.reviewFilters.conflictInfo?.changedFields || [];
+      }
+
       const afterSummary = getCurrentDataSummary();
+      reviewFiltersRestoreInfo.afterFilters = afterSummary.reviewFilters;
 
       RecoveryLogs.add({
         action: '数据恢复',
@@ -931,6 +1050,7 @@ const Store = (function() {
         beforeSummary,
         afterSummary,
         conflicts: conflictResult.hasConflicts ? conflictResult.conflicts : null,
+        reviewFiltersRestore: reviewFiltersRestoreInfo,
         succeeded: true
       });
 
@@ -963,6 +1083,8 @@ const Store = (function() {
     createSampleData,
     exportAllData,
     validateImportStructure,
+    validateReviewFilters,
+    migrateReviewFilters,
     checkVersionCompatibility,
     checkUserPermission,
     detectConflicts,

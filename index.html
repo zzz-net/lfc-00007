@@ -552,6 +552,18 @@
                         </li>
                       </ul>
                     </div>
+                    <div v-if="log.reviewFiltersRestore" class="log-review-filters">
+                      <strong>🔍 复盘筛选配置：</strong>
+                      <span v-if="!log.reviewFiltersRestore.importHasFilters" class="text-muted">
+                        导入包中无筛选配置，保持本地设置不变
+                      </span>
+                      <span v-else-if="log.reviewFiltersRestore.changedFields && log.reviewFiltersRestore.changedFields.length > 0">
+                        已恢复，变化项：{{ getFilterChangedDesc(log.reviewFiltersRestore.changedFields) }}
+                      </span>
+                      <span v-else class="text-success">
+                        已恢复，与本地设置一致
+                      </span>
+                    </div>
                   </div>
                 </div>
               </div>
@@ -624,8 +636,44 @@
                 <li v-if="importPreview.conflicts.unclosedItemIds.length > 0">
                   <strong>未关闭事项编号冲突：</strong>{{ importPreview.conflicts.unclosedItemIds.length }} 个未关闭事项 ID 存在冲突
                 </li>
+                <li v-if="importPreview.reviewFilters && importPreview.reviewFilters.filtersChanged">
+                  <strong>复盘筛选配置变化：</strong>{{ getFilterChangedDesc(importPreview.reviewFilters.conflictInfo?.changedFields || []) }}
+                </li>
               </ul>
               <p class="conflict-note">恢复后以上数据将被导入包中的数据覆盖。</p>
+            </div>
+
+            <!-- 筛选配置信息 -->
+            <div v-if="importPreview.reviewFilters" class="filter-preview-section">
+              <h4>🔍 复盘筛选配置</h4>
+              <div v-if="!importPreview.reviewFilters.importHasFilters" class="alert alert-info">
+                ⚠️ 导入包中不包含复盘筛选配置，恢复后筛选条件将保持当前设置不变
+              </div>
+              <div v-else class="filter-comparison">
+                <div class="filter-comparison-table">
+                  <div class="filter-comparison-row header">
+                    <div>筛选条件</div>
+                    <div>导入包中</div>
+                    <div>当前本地</div>
+                    <div>状态</div>
+                  </div>
+                  <div v-for="field in getFilterFields()" :key="field.key" class="filter-comparison-row" :class="{ 'has-diff': importPreview.reviewFilters.importFilters[field.key] !== importPreview.reviewFilters.currentFilters[field.key] }">
+                    <div>{{ field.label }}</div>
+                    <div>{{ importPreview.reviewFilters.importFilters[field.key] ? '✅ 启用' : '⬜ 关闭' }}</div>
+                    <div>{{ importPreview.reviewFilters.currentFilters[field.key] ? '✅ 启用' : '⬜ 关闭' }}</div>
+                    <div>
+                      <span v-if="importPreview.reviewFilters.importFilters[field.key] !== importPreview.reviewFilters.currentFilters[field.key]" class="diff-tag">将覆盖</span>
+                      <span v-else class="same-tag">一致</span>
+                    </div>
+                  </div>
+                </div>
+                <p v-if="importPreview.reviewFilters.filtersChanged" class="conflict-note">
+                  ⚠️ 导入包中的筛选配置与当前本地不同，恢复后将被导入包中的配置覆盖
+                </p>
+                <p v-else class="conflict-note">
+                  ✅ 导入包中的筛选配置与当前本地一致
+                </p>
+              </div>
             </div>
 
             <!-- 导入包信息 -->

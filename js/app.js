@@ -1282,6 +1282,28 @@ createApp({
       saveReviewFilter();
     }
 
+    function getFilterFields() {
+      return [
+        { key: 'hasRisk', label: '有遗留风险' },
+        { key: 'noRisk', label: '无风险' },
+        { key: 'myResponsible', label: '只看我负责' },
+        { key: 'overdue', label: '已逾期' }
+      ];
+    }
+
+    function getFilterChangedDesc(changedFields) {
+      if (!changedFields || changedFields.length === 0) {
+        return '无变化';
+      }
+      const labels = {
+        hasRisk: '有遗留风险',
+        noRisk: '无风险',
+        myResponsible: '只看我负责',
+        overdue: '已逾期'
+      };
+      return changedFields.map(f => labels[f] || f).join('、');
+    }
+
     function getReviewBySourceId(sourceId) {
       return reviewCards.value.find(c => c.sourceId === sourceId) || null;
     }
@@ -1444,6 +1466,8 @@ createApp({
       toggleFocusMark,
       saveReviewFilter,
       resetReviewFilter,
+      getFilterFields,
+      getFilterChangedDesc,
       getReviewBySourceId,
 
       filterHistory,
