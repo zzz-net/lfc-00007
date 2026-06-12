@@ -7,8 +7,12 @@ const Store = (function() {
     ITEMS: 'handover_items',
     CURRENT_SHIFT: 'handover_current_shift',
     HANDOVER_RECORDS: 'handover_records',
-    CURRENT_USER_ID: 'handover_current_user'
+    CURRENT_USER_ID: 'handover_current_user',
+    RECOVERY_LOGS: 'handover_recovery_logs'
   };
+
+  const CURRENT_DATA_VERSION = '1.1';
+  const COMPATIBLE_VERSIONS = ['1.0', '1.1'];
 
   function generateId(prefix) {
     return prefix + '_' + Date.now() + '_' + Math.random().toString(36).substr(2, 9);
@@ -322,11 +326,34 @@ const Store = (function() {
     }
   };
 
+  const RecoveryLogs = {
+    getAll() {
+      return getFromStorage(STORAGE_KEYS.RECOVERY_LOGS, []);
+    },
+    saveAll(logs) {
+      return saveToStorage(STORAGE_KEYS.RECOVERY_LOGS, logs);
+    },
+    add(log) {
+      const logs = this.getAll();
+      const newLog = {
+        id: generateId('recovery'),
+        ...log,
+        timestamp: Date.now()
+      };
+      logs.unshift(newLog);
+      if (logs.length > 100) {
+        logs.splice(100);
+      }
+      this.saveAll(logs);
+      return newLog;
+    }
+  };
+
   function createSampleData() {
     const sampleRoles = [
-      { id: 'role_admin', name: '班长', canCreate: true, canProcess: true, canClose: true, canConfirm: true },
-      { id: 'role_operator', name: '运维值班员', canCreate: true, canProcess: true, canClose: false, canConfirm: true },
-      { id: 'role_observer', name: '观察员', canCreate: false, canProcess: false, canClose: false, canConfirm: false }
+      { id: 'role_admin', name: '班长', canCreate: true, canProcess: true, canClose: true, canConfirm: true, canManageConfig: true },
+      { id: 'role_operator', name: '运维值班员', canCreate: true, canProcess: true, canClose: false, canConfirm: true, canManageConfig: false },
+      { id: 'role_observer', name: '观察员', canCreate: false, canProcess: false, canClose: false, canConfirm: false, canManageConfig: false }
     ];
     Roles.saveAll(sampleRoles);
 
@@ -407,13 +434,218 @@ const Store = (function() {
       items: Items.getAll(),
       currentShift: CurrentShift.get(),
       handoverRecords: HandoverRecords.getAll(),
+      recoveryLogs: RecoveryLogs.getAll(),
       exportTime: new Date().toISOString(),
-      version: '1.0'
+      version: CURRENT_DATA_VERSION
     };
   }
 
-  function importAllData(data) {
+  function validateImportStructure(data) {
+    const errors = [];
+    const requiredFields = ['version', 'exportTime'];
+    const arrayFields = ['shifts', 'roles', 'users', 'checkItems', 'items', 'handoverRecords'];
+
+    if (typeof data !== 'object' || data === null) {
+      return { valid: false, errors: ['数据格式错误，应为 JSON 对象'] };
+    }
+
+    requiredFields.forEach(field => {
+      if (!(field in data)) {
+        errors.push(`缺少必要字段: ${field}`);
+      }
+    });
+
+    arrayFields.forEach(field => {
+      if (field in data && !Array.isArray(data[field])) {
+        errors.push(`字段 ${field} 应为数组`);
+      }
+    });
+
+    if ('currentShift' in data && typeof data.currentShift !== 'object') {
+      errors.push('字段 currentShift 应为对象');
+    }
+
+    return { valid: errors.length === 0, errors };
+  }
+
+  function checkVersionCompatibility(importVersion) {
+    const isCompatible = COMPATIBLE_VERSIONS.includes(importVersion);
+    const isOlder = importVersion < CURRENT_DATA_VERSION;
+    const isNewer = importVersion > CURRENT_DATA_VERSION;
+
+    return {
+      compatible: isCompatible,
+      isOlder,
+      isNewer,
+      importVersion,
+      currentVersion: CURRENT_DATA_VERSION,
+      message: isCompatible 
+        ? (isOlder ? '导入数据版本较旧，兼容但部分新功能可能缺失' : '版本兼容')
+        : (isNewer ? '导入数据版本过新，可能无法完全兼容' : '导入数据版本不支持')
+    };
+  }
+
+  function checkUserPermission(user) {
+    if (!user || !user.roleId) {
+      return { allowed: false, reason: '未选择当前用户' };
+    }
+    const role = Roles.getById(user.roleId);
+    if (!role) {
+      return { allowed: false, reason: '用户角色不存在' };
+    }
+    const allowed = role.canManageConfig === true;
+    return {
+      allowed,
+      reason: allowed ? '权限验证通过' : '当前用户没有配置管理权限，无法执行恢复操作'
+    };
+  }
+
+  function detectConflicts(importData) {
+    const currentShifts = Shifts.getAll();
+    const currentUsers = Users.getAll();
+    const currentItems = Items.getAll();
+
+    const conflicts = {
+      shiftNames: [],
+      userNames: [],
+      unclosedItemIds: []
+    };
+
+    if (importData.shifts) {
+      const currentShiftNames = currentShifts.map(s => s.name);
+      importData.shifts.forEach(shift => {
+        if (currentShiftNames.includes(shift.name)) {
+          conflicts.shiftNames.push(shift.name);
+        }
+      });
+    }
+
+    if (importData.users) {
+      const currentUserNames = currentUsers.map(u => u.name);
+      importData.users.forEach(user => {
+        if (currentUserNames.includes(user.name)) {
+          conflicts.userNames.push(user.name);
+        }
+      });
+    }
+
+    if (importData.items) {
+      const unclosedItemIds = currentItems
+        .filter(i => i.status !== 'closed')
+        .map(i => i.id);
+      importData.items.forEach(item => {
+        if (item.status !== 'closed' && unclosedItemIds.includes(item.id)) {
+          conflicts.unclosedItemIds.push(item.id);
+        }
+      });
+    }
+
+    const hasConflicts = conflicts.shiftNames.length > 0 || 
+                         conflicts.userNames.length > 0 || 
+                         conflicts.unclosedItemIds.length > 0;
+
+    return { hasConflicts, conflicts };
+  }
+
+  function getImportSummary(importData) {
+    return {
+      shifts: importData.shifts ? importData.shifts.length : 0,
+      roles: importData.roles ? importData.roles.length : 0,
+      users: importData.users ? importData.users.length : 0,
+      checkItems: importData.checkItems ? importData.checkItems.length : 0,
+      items: importData.items ? importData.items.length : 0,
+      handoverRecords: importData.handoverRecords ? importData.handoverRecords.length : 0,
+      recoveryLogs: importData.recoveryLogs ? importData.recoveryLogs.length : 0,
+      exportTime: importData.exportTime,
+      version: importData.version
+    };
+  }
+
+  function getCurrentDataSummary() {
+    return {
+      shifts: Shifts.getAll().length,
+      roles: Roles.getAll().length,
+      users: Users.getAll().length,
+      checkItems: CheckItems.getAll().length,
+      items: Items.getAll().length,
+      handoverRecords: HandoverRecords.getAll().length,
+      recoveryLogs: RecoveryLogs.getAll().length,
+      version: CURRENT_DATA_VERSION
+    };
+  }
+
+  function calculateDifferences(importSummary, currentSummary) {
+    const fields = ['shifts', 'roles', 'users', 'checkItems', 'items', 'handoverRecords', 'recoveryLogs'];
+    const differences = {};
+    let totalChanges = 0;
+
+    fields.forEach(field => {
+      const imported = importSummary[field] || 0;
+      const current = currentSummary[field] || 0;
+      const diff = imported - current;
+      differences[field] = { imported, current, diff };
+      if (diff !== 0) totalChanges++;
+    });
+
+    return { differences, totalChanges };
+  }
+
+  function previewImport(data) {
+    const structureValidation = validateImportStructure(data);
+    if (!structureValidation.valid) {
+      return {
+        success: false,
+        step: 'structure',
+        errors: structureValidation.errors
+      };
+    }
+
+    const versionCheck = checkVersionCompatibility(data.version);
+    const importSummary = getImportSummary(data);
+    const currentSummary = getCurrentDataSummary();
+    const diffResult = calculateDifferences(importSummary, currentSummary);
+    const conflictResult = detectConflicts(data);
+
+    return {
+      success: true,
+      versionCheck,
+      importSummary,
+      currentSummary,
+      differences: diffResult.differences,
+      totalChanges: diffResult.totalChanges,
+      conflicts: conflictResult.conflicts,
+      hasConflicts: conflictResult.hasConflicts
+    };
+  }
+
+  function executeImport(data, operator) {
+    const preview = previewImport(data);
+    if (!preview.success) {
+      RecoveryLogs.add({
+        action: '导入失败',
+        operatorId: operator?.id || 'unknown',
+        operatorName: operator?.name || '未知用户',
+        reason: preview.errors.join('；'),
+        succeeded: false
+      });
+      return { success: false, errors: preview.errors };
+    }
+
+    const permissionCheck = checkUserPermission(operator);
+    if (!permissionCheck.allowed) {
+      RecoveryLogs.add({
+        action: '导入失败',
+        operatorId: operator?.id || 'unknown',
+        operatorName: operator?.name || '未知用户',
+        reason: permissionCheck.reason,
+        succeeded: false
+      });
+      return { success: false, errors: [permissionCheck.reason] };
+    }
+
     try {
+      const beforeSummary = getCurrentDataSummary();
+
       if (data.shifts) Shifts.saveAll(data.shifts);
       if (data.roles) Roles.saveAll(data.roles);
       if (data.users) Users.saveAll(data.users);
@@ -421,10 +653,34 @@ const Store = (function() {
       if (data.items) Items.saveAll(data.items);
       if (data.currentShift) CurrentShift.save(data.currentShift);
       if (data.handoverRecords) HandoverRecords.saveAll(data.handoverRecords);
-      return true;
+      if (data.recoveryLogs) RecoveryLogs.saveAll(data.recoveryLogs);
+
+      const afterSummary = getCurrentDataSummary();
+      const conflictResult = detectConflicts(data);
+
+      RecoveryLogs.add({
+        action: '数据恢复',
+        operatorId: operator.id,
+        operatorName: operator.name,
+        importVersion: data.version,
+        importTime: data.exportTime,
+        beforeSummary,
+        afterSummary,
+        conflicts: conflictResult.hasConflicts ? conflictResult.conflicts : null,
+        succeeded: true
+      });
+
+      return { success: true };
     } catch (e) {
       console.error('导入数据失败:', e);
-      return false;
+      RecoveryLogs.add({
+        action: '导入失败',
+        operatorId: operator?.id || 'unknown',
+        operatorName: operator?.name || '未知用户',
+        reason: e.message,
+        succeeded: false
+      });
+      return { success: false, errors: ['导入过程发生错误: ' + e.message] };
     }
   }
 
@@ -437,9 +693,20 @@ const Store = (function() {
     CurrentShift,
     CurrentUser,
     HandoverRecords,
+    RecoveryLogs,
     createSampleData,
     exportAllData,
-    importAllData,
+    validateImportStructure,
+    checkVersionCompatibility,
+    checkUserPermission,
+    detectConflicts,
+    getImportSummary,
+    getCurrentDataSummary,
+    calculateDifferences,
+    previewImport,
+    executeImport,
+    CURRENT_DATA_VERSION,
+    COMPATIBLE_VERSIONS,
     generateId
   };
 })();

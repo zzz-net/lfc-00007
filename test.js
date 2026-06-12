@@ -289,11 +289,12 @@ test('导出所有数据', () => {
   assert(data.roles && Array.isArray(data.roles), '应包含角色数据');
   assert(data.users && Array.isArray(data.users), '应包含用户数据');
   assert(data.items && Array.isArray(data.items), '应包含事项数据');
-  assert(data.version === '1.0', '应包含版本号');
+  assert(data.version === Store.CURRENT_DATA_VERSION, '应包含版本号');
   assert(data.exportTime, '应包含导出时间');
 });
 
 test('导入数据', () => {
+  const adminUser = Store.Users.getById('user_zhang');
   const data = Store.exportAllData();
   const originalItemCount = Store.Items.getAll().length;
   
@@ -306,8 +307,8 @@ test('导入数据', () => {
   };
   data.items.push(testItem);
   
-  const result = Store.importAllData(data);
-  assert(result === true, '导入应成功');
+  const result = Store.executeImport(data, adminUser);
+  assert(result.success === true, '导入应成功');
   
   const items = Store.Items.getAll();
   assert(items.length === originalItemCount + 1, '事项数量应增加');
@@ -330,6 +331,260 @@ test('必填检查项验证逻辑', () => {
   const requiredNames = requiredItems.map(i => i.name);
   assert(requiredNames.includes('告警平台巡检'), '告警平台巡检应为必填');
   assert(requiredNames.includes('服务器状态检查'), '服务器状态检查应为必填');
+});
+
+console.log('\n--- 7. 备份与恢复测试 ---\n');
+
+test('配置管理权限验证', () => {
+  const adminRole = Store.Roles.getById('role_admin');
+  assert(adminRole.canManageConfig === true, '班长角色应有配置管理权限');
+  
+  const opRole = Store.Roles.getById('role_operator');
+  assert(opRole.canManageConfig === false, '运维值班员角色不应有配置管理权限');
+  
+  const observerRole = Store.Roles.getById('role_observer');
+  assert(observerRole.canManageConfig === false, '观察员角色不应有配置管理权限');
+});
+
+test('成功导出完整数据包', () => {
+  const data = Store.exportAllData();
+  
+  assert(data.shifts && Array.isArray(data.shifts), '导出应包含班次数据');
+  assert(data.roles && Array.isArray(data.roles), '导出应包含角色数据');
+  assert(data.users && Array.isArray(data.users), '导出应包含用户数据');
+  assert(data.checkItems && Array.isArray(data.checkItems), '导出应包含检查项数据');
+  assert(data.items && Array.isArray(data.items), '导出应包含事项数据');
+  assert(data.handoverRecords && Array.isArray(data.handoverRecords), '导出应包含交接记录');
+  assert(data.recoveryLogs && Array.isArray(data.recoveryLogs), '导出应包含恢复日志');
+  assert(data.currentShift, '导出应包含当前班次设置');
+  assert(data.version === Store.CURRENT_DATA_VERSION, '导出版本号应与当前版本一致');
+  assert(data.exportTime, '导出应包含导出时间');
+  
+  const date = new Date(data.exportTime);
+  assert(!isNaN(date.getTime()), '导出时间应为有效的 ISO 格式');
+});
+
+test('非法 JSON - 结构校验失败', () => {
+  const invalidData1 = null;
+  const result1 = Store.validateImportStructure(invalidData1);
+  assert(result1.valid === false, 'null 数据应校验失败');
+  
+  const invalidData2 = { missing: 'fields' };
+  const result2 = Store.validateImportStructure(invalidData2);
+  assert(result2.valid === false, '缺少必要字段应校验失败');
+  assert(result2.errors.length > 0, '应有错误信息');
+  
+  const invalidData3 = { version: '1.0', exportTime: '2026-06-13T00:00:00.000Z', shifts: 'not_an_array' };
+  const result3 = Store.validateImportStructure(invalidData3);
+  assert(result3.valid === false, '字段类型错误应校验失败');
+});
+
+test('版本兼容性检查', () => {
+  const check1 = Store.checkVersionCompatibility('1.0');
+  assert(check1.compatible === true, '1.0 版本应兼容');
+  assert(check1.isOlder === true, '1.0 版本应被识别为旧版本');
+  
+  const check2 = Store.checkVersionCompatibility(Store.CURRENT_DATA_VERSION);
+  assert(check2.compatible === true, '当前版本应兼容');
+  assert(check2.isOlder === false, '当前版本不应被识别为旧版本');
+  
+  const check3 = Store.checkVersionCompatibility('0.5');
+  assert(check3.compatible === false, '0.5 版本应不兼容');
+});
+
+test('权限校验 - 只有配置管理员能恢复', () => {
+  const adminUser = Store.Users.getById('user_zhang');
+  const adminCheck = Store.checkUserPermission(adminUser);
+  assert(adminCheck.allowed === true, '班长应能执行恢复操作');
+  
+  const opUser = Store.Users.getById('user_li');
+  const opCheck = Store.checkUserPermission(opUser);
+  assert(opCheck.allowed === false, '运维值班员不应能执行恢复操作');
+  
+  const observerUser = Store.Users.getById('user_zhao');
+  const observerCheck = Store.checkUserPermission(observerUser);
+  assert(observerCheck.allowed === false, '观察员不应能执行恢复操作');
+  
+  const nullCheck = Store.checkUserPermission(null);
+  assert(nullCheck.allowed === false, '未选择用户不应能执行恢复操作');
+});
+
+test('冲突检测 - 同名班次、用户、未关闭事项', () => {
+  const originalData = Store.exportAllData();
+  
+  const importData = {
+    ...originalData,
+    shifts: [
+      ...originalData.shifts,
+      { id: 'new_shift', name: '白班', startTime: '09:00', endTime: '18:00' }
+    ],
+    users: [
+      ...originalData.users,
+      { id: 'new_user', name: '张三', roleId: 'role_admin' }
+    ],
+    items: [
+      ...originalData.items.map(i => ({ ...i, status: i.status === 'closed' ? 'closed' : 'processing' }))
+    ]
+  };
+  
+  const conflicts = Store.detectConflicts(importData);
+  assert(conflicts.hasConflicts === true, '应检测到冲突');
+  assert(conflicts.conflicts.shiftNames.includes('白班'), '应检测到同名班次冲突');
+  assert(conflicts.conflicts.userNames.includes('张三'), '应检测到同名用户冲突');
+  
+  const unclosedItems = originalData.items.filter(i => i.status !== 'closed');
+  if (unclosedItems.length > 0) {
+    assert(conflicts.conflicts.unclosedItemIds.length > 0, '应检测到未关闭事项ID冲突');
+  }
+});
+
+test('导入预览功能', () => {
+  const originalData = Store.exportAllData();
+  const preview = Store.previewImport(originalData);
+  
+  assert(preview.success === true, '预览应成功');
+  assert(preview.versionCheck.compatible === true, '版本应兼容');
+  assert(preview.importSummary, '应有导入包摘要');
+  assert(preview.currentSummary, '应有当前数据摘要');
+  assert(preview.differences, '应有差异对比');
+  assert(preview.totalChanges === 0, '相同数据应无差异');
+  
+  const modifiedData = { ...originalData };
+  modifiedData.items = [...modifiedData.items, { id: 'test_preview_item', title: '测试', status: 'new', version: 1 }];
+  const preview2 = Store.previewImport(modifiedData);
+  assert(preview2.totalChanges >= 1, '修改后数据应有差异');
+});
+
+test('冲突取消 - 不执行覆盖', () => {
+  const originalItems = Store.Items.getAll();
+  const originalCount = originalItems.length;
+  const originalData = Store.exportAllData();
+  
+  const modifiedData = {
+    ...originalData,
+    items: [...originalData.items, { id: 'test_cancel_item', title: '测试取消恢复', status: 'new', version: 1 }]
+  };
+  
+  Store.Items.saveAll(originalItems);
+  
+  const currentItems = Store.Items.getAll();
+  assert(currentItems.length === originalCount, '取消恢复后事项数量应保持不变');
+  
+  const notFound = Store.Items.getById('test_cancel_item');
+  assert(notFound === null, '取消恢复后不应包含测试事项');
+});
+
+test('恢复后持久化 - 数据保持一致', () => {
+  Store.RecoveryLogs.saveAll([]);
+  
+  const adminUser = Store.Users.getById('user_zhang');
+  const originalData = Store.exportAllData();
+  const originalItemCount = originalData.items.length;
+  const originalRecordCount = originalData.handoverRecords.length;
+  
+  const testItem = {
+    id: 'test_persistence_item',
+    title: '持久化测试事项',
+    type: 'alert',
+    status: 'new',
+    version: 1,
+    shiftId: 'shift_morning',
+    shiftDate: '2026-06-13',
+    creatorId: 'user_zhang',
+    creatorName: '张三',
+    assigneeId: '',
+    assigneeName: '',
+    createTime: Date.now(),
+    updateTime: Date.now(),
+    closeTime: null,
+    closeReason: '',
+    history: []
+  };
+  
+  const modifiedData = {
+    ...originalData,
+    items: [...originalData.items, testItem],
+    handoverRecords: originalData.handoverRecords
+  };
+  
+  const result = Store.executeImport(modifiedData, adminUser);
+  assert(result.success === true, '导入应成功');
+  
+  const itemsAfter = Store.Items.getAll();
+  assert(itemsAfter.length === originalItemCount + 1, '事项数量应增加');
+  
+  const foundItem = Store.Items.getById('test_persistence_item');
+  assert(foundItem !== null, '应能找到导入的事项');
+  assert(foundItem.title === '持久化测试事项', '事项标题应正确');
+  assert(foundItem.version === 1, '事项版本号应保持');
+  
+  const recordsAfter = Store.HandoverRecords.getAll();
+  assert(recordsAfter.length === originalRecordCount, '交接记录数量应保持不变');
+  
+  const logs = Store.RecoveryLogs.getAll();
+  assert(logs.length >= 1, '应有恢复日志');
+  assert(logs[0].succeeded === true, '恢复日志应标记成功');
+  assert(logs[0].operatorName === '张三', '恢复日志应记录操作人');
+  assert(logs[0].beforeSummary.items === originalItemCount, '恢复前事项数量应正确');
+  assert(logs[0].afterSummary.items === originalItemCount + 1, '恢复后事项数量应正确');
+  
+  const reExported = Store.exportAllData();
+  assert(reExported.items.length === originalItemCount + 1, '重新导出后事项数量应保持');
+  assert(reExported.recoveryLogs.length >= 1, '重新导出应包含恢复日志');
+  assert(reExported.version === Store.CURRENT_DATA_VERSION, '重新导出版本号应正确');
+  
+  const recoveredItem = reExported.items.find(i => i.id === 'test_persistence_item');
+  assert(recoveredItem !== null, '重新导出应包含持久化测试事项');
+});
+
+test('权限不足时执行导入失败', () => {
+  const opUser = Store.Users.getById('user_li');
+  const originalData = Store.exportAllData();
+  const originalLogCount = Store.RecoveryLogs.getAll().length;
+  
+  const modifiedData = {
+    ...originalData,
+    items: [...originalData.items, { id: 'test_perm_item', title: '测试', status: 'new', version: 1 }]
+  };
+  
+  const result = Store.executeImport(modifiedData, opUser);
+  assert(result.success === false, '权限不足应导入失败');
+  assert(result.errors.length > 0, '应有错误信息');
+  
+  const logs = Store.RecoveryLogs.getAll();
+  assert(logs.length === originalLogCount + 1, '应记录失败日志');
+  assert(logs[0].succeeded === false, '失败日志应标记失败');
+  assert(logs[0].reason.includes('权限'), '失败原因应包含权限');
+  
+  const item = Store.Items.getById('test_perm_item');
+  assert(item === null, '权限不足时不应导入数据');
+});
+
+test('恢复日志功能', () => {
+  Store.RecoveryLogs.saveAll([]);
+  
+  const log1 = Store.RecoveryLogs.add({
+    action: '数据恢复',
+    operatorId: 'user_zhang',
+    operatorName: '张三',
+    importVersion: '1.1',
+    succeeded: true
+  });
+  
+  const log2 = Store.RecoveryLogs.add({
+    action: '导入失败',
+    operatorId: 'user_li',
+    operatorName: '李四',
+    reason: '权限不足',
+    succeeded: false
+  });
+  
+  const logs = Store.RecoveryLogs.getAll();
+  assert(logs.length === 2, '应有2条恢复日志');
+  assert(logs[0].id === log2.id, '日志应按时间倒序排列');
+  assert(logs[0].succeeded === false, '第一条应为失败日志');
+  assert(logs[1].succeeded === true, '第二条应为成功日志');
+  assert(logs[0].timestamp, '日志应有时间戳');
 });
 
 console.log('\n=== 测试结果总结 ===');

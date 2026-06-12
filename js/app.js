@@ -11,6 +11,7 @@ createApp({
     const checkItems = ref([]);
     const items = ref([]);
     const handoverRecords = ref([]);
+    const recoveryLogs = ref([]);
 
     const currentShiftId = ref('');
     const currentShiftDate = ref('');
@@ -22,6 +23,7 @@ createApp({
     const showCloseModal = ref(false);
     const showConfirmModal = ref(false);
     const showConflictModal = ref(false);
+    const showImportPreviewModal = ref(false);
 
     const editingItem = ref(null);
     const selectedItem = ref(null);
@@ -29,6 +31,13 @@ createApp({
     const confirmChecks = reactive({});
     const confirmError = ref('');
     const conflictInfo = ref(null);
+
+    const importFileInput = ref(null);
+    const selectedFileName = ref('');
+    const selectedFileContent = ref(null);
+    const importPreview = ref(null);
+    const importPermission = ref({ allowed: false, reason: '' });
+    const importError = ref('');
 
     const editingBaseVersion = ref(0);
 
@@ -170,6 +179,14 @@ createApp({
       return currentUserRole.value.canConfirm;
     });
 
+    const currentDataVersion = computed(() => {
+      return Store.CURRENT_DATA_VERSION;
+    });
+
+    const currentSummary = computed(() => {
+      return Store.getCurrentDataSummary();
+    });
+
     function loadData() {
       shifts.value = Store.Shifts.getAll();
       roles.value = Store.Roles.getAll();
@@ -177,6 +194,7 @@ createApp({
       checkItems.value = Store.CheckItems.getAll();
       items.value = Store.Items.getAll();
       handoverRecords.value = Store.HandoverRecords.getAll();
+      recoveryLogs.value = Store.RecoveryLogs.getAll();
 
       const currentShiftData = Store.CurrentShift.get();
       currentShiftId.value = currentShiftData.shiftId || '';
@@ -812,6 +830,119 @@ createApp({
       }
     }
 
+    function formatIsoTime(isoString) {
+      if (!isoString) return '-';
+      const date = new Date(isoString);
+      return formatTime(date.getTime());
+    }
+
+    function getDiffLabel(key) {
+      const labels = {
+        shifts: '班次',
+        roles: '角色',
+        users: '用户',
+        checkItems: '检查项',
+        items: '事项',
+        handoverRecords: '交接记录',
+        recoveryLogs: '恢复日志'
+      };
+      return labels[key] || key;
+    }
+
+    function exportAllData() {
+      const data = Store.exportAllData();
+      const jsonStr = JSON.stringify(data, null, 2);
+      const filename = `值班交接备份_${new Date().toISOString().split('T')[0]}.json`;
+      downloadFile(jsonStr, filename, 'application/json');
+      showToast('数据包已导出', 'success');
+    }
+
+    function onFileSelected(event) {
+      const file = event.target.files[0];
+      if (!file) return;
+
+      if (!file.name.endsWith('.json')) {
+        importError.value = '请选择 JSON 格式的文件';
+        return;
+      }
+
+      selectedFileName.value = file.name;
+      importError.value = '';
+
+      const reader = new FileReader();
+      reader.onload = (e) => {
+        try {
+          const content = JSON.parse(e.target.result);
+          selectedFileContent.value = content;
+        } catch (err) {
+          importError.value = 'JSON 格式解析失败：' + err.message;
+          selectedFileContent.value = null;
+        }
+      };
+      reader.onerror = () => {
+        importError.value = '文件读取失败';
+        selectedFileContent.value = null;
+      };
+      reader.readAsText(file);
+    }
+
+    function clearFileSelection() {
+      selectedFileName.value = '';
+      selectedFileContent.value = null;
+      importPreview.value = null;
+      importPermission.value = { allowed: false, reason: '' };
+      importError.value = '';
+      if (importFileInput.value) {
+        importFileInput.value.value = '';
+      }
+    }
+
+    function previewAndValidateImport() {
+      if (!selectedFileContent.value) {
+        importError.value = '请先选择有效的 JSON 文件';
+        return;
+      }
+
+      const preview = Store.previewImport(selectedFileContent.value);
+      if (!preview.success) {
+        importError.value = '数据结构校验失败：' + preview.errors.join('；');
+        return;
+      }
+
+      importPreview.value = preview;
+      importPermission.value = Store.checkUserPermission(currentUser.value);
+      showImportPreviewModal.value = true;
+      importError.value = '';
+    }
+
+    function cancelImport() {
+      showImportPreviewModal.value = false;
+      importPreview.value = null;
+      importPermission.value = { allowed: false, reason: '' };
+    }
+
+    function confirmRestore() {
+      if (!importPermission.value.allowed) {
+        showToast('没有权限执行恢复操作', 'error');
+        return;
+      }
+
+      if (!confirm('确定要覆盖当前所有数据吗？此操作不可撤销！')) {
+        return;
+      }
+
+      const result = Store.executeImport(selectedFileContent.value, currentUser.value);
+
+      if (result.success) {
+        showToast('数据恢复成功', 'success');
+        showImportPreviewModal.value = false;
+        clearFileSelection();
+        loadData();
+      } else {
+        showToast('恢复失败：' + (result.errors && result.errors[0] ? result.errors[0] : '未知错误'), 'error');
+      }
+    }
+
     function testVersionConflict() {
       console.log('=== 版本冲突测试 ===');
       const testItem = items.value[0];
@@ -865,6 +996,7 @@ createApp({
       checkItems,
       items,
       handoverRecords,
+      recoveryLogs,
       currentShiftId,
       currentShiftDate,
       handoverUserId,
@@ -874,12 +1006,18 @@ createApp({
       showCloseModal,
       showConfirmModal,
       showConflictModal,
+      showImportPreviewModal,
       editingItem,
       selectedItem,
       closeReason,
       confirmChecks,
       confirmError,
       conflictInfo,
+      importFileInput,
+      selectedFileName,
+      importPreview,
+      importPermission,
+      importError,
       toast,
       historyFilter,
       filteredHistory,
@@ -890,6 +1028,8 @@ createApp({
       currentUserRole,
       handoverUserName,
       pendingConfirmItems,
+      currentDataVersion,
+      currentSummary,
 
       itemsByStatus,
       canEditItem,
@@ -899,10 +1039,12 @@ createApp({
       canConfirm,
 
       formatTime,
+      formatIsoTime,
       getRoleName,
       getItemTypeName,
       getStatusName,
       getHandoverStatusName,
+      getDiffLabel,
 
       addShift,
       removeShift,
@@ -936,7 +1078,14 @@ createApp({
       viewHandoverRecord,
 
       createSampleData,
-      testVersionConflict
+      testVersionConflict,
+
+      exportAllData,
+      onFileSelected,
+      clearFileSelection,
+      previewAndValidateImport,
+      cancelImport,
+      confirmRestore
     };
   }
 }).mount('#app');

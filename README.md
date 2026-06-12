@@ -93,6 +93,19 @@ lfc-00007/
 - checkResults: 检查项结果
 - itemsSnapshot: 事项快照
 
+### 恢复日志 (RecoveryLog)
+- id: 唯一标识
+- action: 操作类型（数据恢复/导入失败）
+- operatorId/operatorName: 操作人
+- importVersion: 导入数据版本
+- importTime: 导入数据导出时间
+- beforeSummary: 恢复前数据摘要
+- afterSummary: 恢复后数据摘要
+- conflicts: 冲突信息（班次、用户、事项）
+- reason: 失败原因（仅失败时）
+- succeeded: 是否成功
+- timestamp: 操作时间戳
+
 ## 验收步骤
 
 ### 第一步：创建样例数据

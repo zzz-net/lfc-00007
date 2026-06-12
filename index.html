@@ -27,6 +27,7 @@
         </select>
         <button @click="activeTab = 'config'" class="btn btn-outline">⚙️ 配置</button>
         <button @click="activeTab = 'history'" class="btn btn-outline">📜 历史记录</button>
+        <button @click="activeTab = 'backup'" class="btn btn-outline">💾 备份恢复</button>
         <button @click="exportHandover" class="btn btn-primary">📤 导出交接单</button>
       </div>
     </header>
@@ -347,7 +348,229 @@
           </div>
         </div>
       </div>
+
+      <!-- 备份与恢复中心 -->
+      <div v-if="activeTab === 'backup'" class="backup-view">
+        <div class="backup-header">
+          <h2>💾 备份与恢复中心</h2>
+          <div class="backup-version-info">
+            当前数据版本：<b>{{ currentDataVersion }}</b>
+          </div>
+        </div>
+
+        <div class="backup-sections">
+          <!-- 导出区域 -->
+          <div class="backup-section">
+            <div class="section-header">
+              <h3>📤 导出数据包</h3>
+            </div>
+            <div class="section-body">
+              <p class="section-desc">
+                导出完整的数据包，包含班次、角色、用户、检查项、事项、交接记录、恢复日志、版本号和导出时间。
+              </p>
+              <div class="export-summary">
+                <div class="summary-item">
+                  <span class="summary-label">班次：</span>
+                  <span class="summary-value">{{ currentSummary.shifts }}</span>
+                </div>
+                <div class="summary-item">
+                  <span class="summary-label">角色：</span>
+                  <span class="summary-value">{{ currentSummary.roles }}</span>
+                </div>
+                <div class="summary-item">
+                  <span class="summary-label">用户：</span>
+                  <span class="summary-value">{{ currentSummary.users }}</span>
+                </div>
+                <div class="summary-item">
+                  <span class="summary-label">检查项：</span>
+                  <span class="summary-value">{{ currentSummary.checkItems }}</span>
+                </div>
+                <div class="summary-item">
+                  <span class="summary-label">事项：</span>
+                  <span class="summary-value">{{ currentSummary.items }}</span>
+                </div>
+                <div class="summary-item">
+                  <span class="summary-label">交接记录：</span>
+                  <span class="summary-value">{{ currentSummary.handoverRecords }}</span>
+                </div>
+                <div class="summary-item">
+                  <span class="summary-label">恢复日志：</span>
+                  <span class="summary-value">{{ currentSummary.recoveryLogs }}</span>
+                </div>
+              </div>
+              <button @click="exportAllData" class="btn btn-primary btn-large">📥 导出完整数据包</button>
+            </div>
+          </div>
+
+          <!-- 导入区域 -->
+          <div class="backup-section">
+            <div class="section-header">
+              <h3>📥 从本地导入恢复</h3>
+            </div>
+            <div class="section-body">
+              <p class="section-desc">
+                选择本地 JSON 文件进行数据恢复。导入前将进行结构校验、版本兼容检查和权限校验。
+              </p>
+              <div class="import-area">
+                <input type="file" ref="importFileInput" @change="onFileSelected" accept=".json" class="file-input" id="importFile">
+                <label for="importFile" class="file-label">
+                  <span v-if="!selectedFileName">📁 点击选择 JSON 文件</span>
+                  <span v-else>📁 {{ selectedFileName }}</span>
+                </label>
+                <div v-if="selectedFileName" class="import-actions">
+                  <button @click="clearFileSelection" class="btn btn-outline btn-sm">清除</button>
+                  <button @click="previewAndValidateImport" class="btn btn-success btn-large">🔍 预览并验证</button>
+                </div>
+              </div>
+              <div v-if="importError" class="alert alert-error">
+                {{ importError }}
+              </div>
+            </div>
+          </div>
+
+          <!-- 恢复日志区域 -->
+          <div class="backup-section">
+            <div class="section-header">
+              <h3>📋 恢复日志</h3>
+            </div>
+            <div class="section-body">
+              <div v-if="recoveryLogs.length === 0" class="empty-state">
+                暂无恢复日志
+              </div>
+              <div v-else class="recovery-log-list">
+                <div v-for="log in recoveryLogs" :key="log.id" class="recovery-log-item" :class="{ 'log-success': log.succeeded, 'log-failed': !log.succeeded }">
+                  <div class="log-header">
+                    <span class="log-status">{{ log.succeeded ? '✅' : '❌' }}</span>
+                    <span class="log-action">{{ log.action }}</span>
+                    <span class="log-time">{{ formatTime(log.timestamp) }}</span>
+                  </div>
+                  <div class="log-body">
+                    <div class="log-info">
+                      <span>操作人：{{ log.operatorName }}</span>
+                      <span v-if="log.importVersion">导入版本：{{ log.importVersion }}</span>
+                    </div>
+                    <div v-if="log.reason" class="log-reason">
+                      原因：{{ log.reason }}
+                    </div>
+                    <div v-if="log.beforeSummary && log.afterSummary" class="log-summary">
+                      <div class="log-summary-grid">
+                        <div class="log-summary-header">类型</div>
+                        <div class="log-summary-header">恢复前</div>
+                        <div class="log-summary-header">恢复后</div>
+                        <div>班次</div><div>{{ log.beforeSummary.shifts }}</div><div>{{ log.afterSummary.shifts }}</div>
+                        <div>角色</div><div>{{ log.beforeSummary.roles }}</div><div>{{ log.afterSummary.roles }}</div>
+                        <div>用户</div><div>{{ log.beforeSummary.users }}</div><div>{{ log.afterSummary.users }}</div>
+                        <div>检查项</div><div>{{ log.beforeSummary.checkItems }}</div><div>{{ log.afterSummary.checkItems }}</div>
+                        <div>事项</div><div>{{ log.beforeSummary.items }}</div><div>{{ log.afterSummary.items }}</div>
+                        <div>交接记录</div><div>{{ log.beforeSummary.handoverRecords }}</div><div>{{ log.afterSummary.handoverRecords }}</div>
+                      </div>
+                    </div>
+                    <div v-if="log.conflicts" class="log-conflicts">
+                      <strong>⚠️ 冲突提示：</strong>
+                      <ul>
+                        <li v-if="log.conflicts.shiftNames && log.conflicts.shiftNames.length > 0">
+                          同名班次：{{ log.conflicts.shiftNames.join('、') }}
+                        </li>
+                        <li v-if="log.conflicts.userNames && log.conflicts.userNames.length > 0">
+                          同名用户：{{ log.conflicts.userNames.join('、') }}
+                        </li>
+                        <li v-if="log.conflicts.unclosedItemIds && log.conflicts.unclosedItemIds.length > 0">
+                          未关闭事项编号冲突：{{ log.conflicts.unclosedItemIds.length }} 个
+                        </li>
+                      </ul>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
     </main>
+
+    <!-- 导入预览弹窗 -->
+    <div v-if="showImportPreviewModal" class="modal-overlay" @click.self="showImportPreviewModal = false">
+      <div class="modal modal-xlarge">
+        <div class="modal-header">
+          <h3>🔍 导入预览与确认</h3>
+          <button @click="cancelImport" class="modal-close">×</button>
+        </div>
+        <div class="modal-body">
+          <div v-if="importPreview" class="import-preview-content">
+            <!-- 版本兼容提示 -->
+            <div class="version-alert" :class="{
+              'alert-success': importPreview.versionCheck.compatible && !importPreview.versionCheck.isOlder,
+              'alert-warning': importPreview.versionCheck.compatible && importPreview.versionCheck.isOlder,
+              'alert-error': !importPreview.versionCheck.compatible
+            }">
+              <strong>版本检查：</strong>
+              {{ importPreview.versionCheck.message }}
+              （导入版本：{{ importPreview.versionCheck.importVersion }}，当前版本：{{ importPreview.versionCheck.currentVersion }}）
+            </div>
+
+            <!-- 权限检查 -->
+            <div class="permission-alert" :class="importPermission.allowed ? 'alert-success' : 'alert-error'">
+              <strong>权限检查：</strong>
+              {{ importPermission.reason }}
+            </div>
+
+            <!-- 数据摘要对比 -->
+            <h4>📊 数据摘要对比</h4>
+            <div class="summary-comparison">
+              <div class="comparison-table">
+                <div class="comparison-row header">
+                  <div>数据类型</div>
+                  <div>导入包</div>
+                  <div>当前数据</div>
+                  <div>差异</div>
+                </div>
+                <div v-for="(diff, key) in importPreview.differences" :key="key" class="comparison-row" :class="{ 'has-diff': diff.diff !== 0 }">
+                  <div class="diff-label">{{ getDiffLabel(key) }}</div>
+                  <div>{{ diff.imported }}</div>
+                  <div>{{ diff.current }}</div>
+                  <div class="diff-value" :class="{ 'diff-pos': diff.diff > 0, 'diff-neg': diff.diff < 0 }">
+                    {{ diff.diff > 0 ? '+' : '' }}{{ diff.diff }}
+                  </div>
+                </div>
+              </div>
+              <div class="total-changes">
+                <strong>共有 {{ importPreview.totalChanges }} 类数据将发生变化</strong>
+              </div>
+            </div>
+
+            <!-- 冲突提示 -->
+            <div v-if="importPreview.hasConflicts" class="conflict-alert alert-warning">
+              <h4>⚠️ 检测到以下冲突：</h4>
+              <ul>
+                <li v-if="importPreview.conflicts.shiftNames.length > 0">
+                  <strong>同名班次：</strong>{{ importPreview.conflicts.shiftNames.join('、') }}
+                </li>
+                <li v-if="importPreview.conflicts.userNames.length > 0">
+                  <strong>同名用户：</strong>{{ importPreview.conflicts.userNames.join('、') }}
+                </li>
+                <li v-if="importPreview.conflicts.unclosedItemIds.length > 0">
+                  <strong>未关闭事项编号冲突：</strong>{{ importPreview.conflicts.unclosedItemIds.length }} 个未关闭事项 ID 存在冲突
+                </li>
+              </ul>
+              <p class="conflict-note">恢复后以上数据将被导入包中的数据覆盖。</p>
+            </div>
+
+            <!-- 导入包信息 -->
+            <div class="import-info">
+              <div><strong>导入包信息：</strong></div>
+              <div>导出时间：{{ formatIsoTime(importPreview.importSummary.exportTime) }}</div>
+              <div>导出版本：{{ importPreview.importSummary.version }}</div>
+            </div>
+          </div>
+        </div>
+        <div class="modal-footer">
+          <button @click="cancelImport" class="btn btn-outline">取消</button>
+          <button @click="confirmRestore" class="btn btn-danger" :disabled="!importPermission.allowed">
+            ⚠️ 确认覆盖恢复
+          </button>
+        </div>
+      </div>
+    </div>
 
     <!-- 新建/编辑事项弹窗 -->
     <div v-if="showAddItemModal" class="modal-overlay" @click.self="showAddItemModal = false">
