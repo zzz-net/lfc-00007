@@ -362,29 +362,56 @@
       <div v-if="activeTab === 'review'" class="review-view">
         <div class="review-header">
           <h2>🔍 交接复盘中心</h2>
-          <div class="review-count">共 {{ reviewCards.length }} 张复盘卡</div>
+          <div class="review-count">共 {{ reviewCards.length }} 张复盘卡，当前显示 {{ filteredReviewCards.length }} 张</div>
+        </div>
+        <div class="review-filter-bar">
+          <label class="filter-checkbox" :class="{ active: reviewFilter.hasRisk }">
+            <input type="checkbox" v-model="reviewFilter.hasRisk"> ⚠️ 有遗留风险
+          </label>
+          <label class="filter-checkbox" :class="{ active: reviewFilter.noRisk }">
+            <input type="checkbox" v-model="reviewFilter.noRisk"> ✅ 无风险
+          </label>
+          <label class="filter-checkbox" :class="{ active: reviewFilter.myResponsible }">
+            <input type="checkbox" v-model="reviewFilter.myResponsible"> 👤 只看我负责
+          </label>
+          <label class="filter-checkbox" :class="{ active: reviewFilter.overdue }">
+            <input type="checkbox" v-model="reviewFilter.overdue"> ⏰ 已逾期
+          </label>
+          <button @click="resetReviewFilter" class="btn btn-outline btn-sm">重置筛选</button>
         </div>
         <div v-if="reviewCards.length === 0" class="empty-state">
           暂无复盘卡。可在已关闭事项或历史交接记录中创建复盘卡。
         </div>
+        <div v-else-if="filteredReviewCards.length === 0" class="empty-state">
+          当前筛选条件下没有匹配的复盘卡。
+        </div>
         <div v-else class="review-list">
-          <div v-for="card in reviewCards" :key="card.id" class="review-card-item" @click="openReviewDetail(card)">
+          <div v-for="card in filteredReviewCards" :key="card.id" class="review-card-item" :class="{ 'review-card-focus': card.focusMark }" @click="openReviewDetail(card)">
             <div class="review-card-header">
-              <span class="review-card-source">{{ card.sourceType === 'handover_record' ? '交接记录' : '已关闭事项' }}</span>
+              <div class="review-card-header-left">
+                <span class="review-card-source">{{ card.sourceType === 'handover_record' ? '交接记录' : '已关闭事项' }}</span>
+                <span v-if="card.focusMark" class="review-card-focus-badge">⭐ 重点关注</span>
+              </div>
               <span class="review-card-risk" :class="card.hasRisk ? 'risk-yes' : 'risk-no'">{{ card.hasRisk ? '⚠️ 有遗留风险' : '✅ 无遗留风险' }}</span>
             </div>
             <div class="review-card-summary">{{ card.sourceSummary }}</div>
             <div class="review-card-meta">
               <span v-if="card.responsiblePersonName">责任人：{{ card.responsiblePersonName }}</span>
               <span v-if="card.followUpDeadline">截止时间：{{ card.followUpDeadline }}</span>
+              <span v-if="isReviewCardOverdue(card)" class="overdue-badge">⏰ 已逾期</span>
               <span>创建人：{{ card.creatorName }}</span>
               <span>{{ formatTime(card.createTime) }}</span>
             </div>
             <div v-if="card.conclusion" class="review-card-conclusion">
               <strong>复盘结论：</strong>{{ card.conclusion }}
             </div>
-            <div class="review-card-followup-count">
-              跟进说明 {{ card.followUpNotes.length }} 条
+            <div class="review-card-footer">
+              <span class="review-card-followup-count">
+                跟进说明 {{ card.followUpNotes.length }} 条
+              </span>
+              <button v-if="canToggleFocusMark" @click="toggleFocusMark(card, $event)" class="btn btn-sm" :class="card.focusMark ? 'btn-warning' : 'btn-outline'">
+                {{ card.focusMark ? '⭐ 取消重点' : '☆ 标为重点' }}
+              </button>
             </div>
           </div>
         </div>
@@ -508,6 +535,7 @@
                         <div>检查项</div><div>{{ log.beforeSummary.checkItems }}</div><div>{{ log.afterSummary.checkItems }}</div>
                         <div>事项</div><div>{{ log.beforeSummary.items }}</div><div>{{ log.afterSummary.items }}</div>
                         <div>交接记录</div><div>{{ log.beforeSummary.handoverRecords }}</div><div>{{ log.afterSummary.handoverRecords }}</div>
+                        <div>复盘卡</div><div>{{ log.beforeSummary.reviewCards }}</div><div>{{ log.afterSummary.reviewCards }}</div>
                       </div>
                     </div>
                     <div v-if="log.conflicts" class="log-conflicts">
@@ -882,7 +910,7 @@
     <div v-if="showReviewDetailModal" class="modal-overlay" @click.self="showReviewDetailModal = false">
       <div class="modal modal-large">
         <div class="modal-header">
-          <h3>🔍 复盘卡详情</h3>
+          <h3>🔍 复盘卡详情 <span v-if="selectedReviewCard && selectedReviewCard.focusMark" class="review-detail-focus-badge">⭐ 重点关注</span></h3>
           <button @click="showReviewDetailModal = false" class="modal-close">×</button>
         </div>
         <div class="modal-body" v-if="selectedReviewCard">
@@ -894,6 +922,10 @@
           <!-- 查看/编辑模式 -->
           <div v-if="!isEditingReview">
             <div class="detail-section">
+              <div class="detail-row">
+                <span class="detail-label">重点标记：</span>
+                <span :class="selectedReviewCard.focusMark ? 'text-warning' : 'text-muted'">{{ selectedReviewCard.focusMark ? '⭐ 重点关注' : '普通' }}</span>
+              </div>
               <div class="detail-row">
                 <span class="detail-label">遗留风险：</span>
                 <span :class="selectedReviewCard.hasRisk ? 'text-danger' : 'text-success'">{{ selectedReviewCard.hasRisk ? '⚠️ 是' : '✅ 否' }}</span>
@@ -909,6 +941,7 @@
               <div class="detail-row">
                 <span class="detail-label">截止时间：</span>
                 <span>{{ selectedReviewCard.followUpDeadline || '未设置' }}</span>
+                <span v-if="isReviewCardOverdue(selectedReviewCard)" class="overdue-badge" style="margin-left: 8px;">⏰ 已逾期</span>
               </div>
               <div class="detail-row">
                 <span class="detail-label">复盘结论：</span>
@@ -1002,6 +1035,9 @@
           </div>
         </div>
         <div class="modal-footer">
+          <button v-if="canToggleFocusMark" @click="toggleFocusMark(selectedReviewCard)" class="btn" :class="selectedReviewCard && selectedReviewCard.focusMark ? 'btn-warning' : 'btn-outline'">
+            {{ selectedReviewCard && selectedReviewCard.focusMark ? '⭐ 取消重点' : '☆ 标为重点' }}
+          </button>
           <button v-if="canEditReviewConclusion && !isEditingReview" @click="isEditingReview = true" class="btn btn-primary">✏️ 编辑复盘</button>
           <button v-if="isEditingReview" @click="saveReviewConclusion" class="btn btn-success">保存修改</button>
           <button v-if="isEditingReview" @click="isEditingReview = false" class="btn btn-outline">取消编辑</button>

@@ -1487,6 +1487,346 @@ test('复盘卡校验 - reviewCards 字段应在导入校验中', () => {
   assert(invalidValidation.valid === false, 'reviewCards 非数组应校验失败');
 });
 
+console.log('\n--- 9. 日常追踪能力测试 ---\n');
+
+test('focusMark 字段 - 创建复盘卡时默认为 false', () => {
+  Store.ReviewCards.saveAll([]);
+  const adminUser = Store.Users.getById('user_zhang');
+  const result = Store.ReviewCards.create({
+    sourceType: 'closed_item',
+    sourceId: 'focus_test_1',
+    sourceSummary: '重点标记测试',
+    hasRisk: true,
+    riskDescription: '测试风险',
+    responsiblePersonId: 'user_li',
+    responsiblePersonName: '李四',
+    followUpDeadline: '2020-01-01',
+    conclusion: '测试结论'
+  }, adminUser);
+  assert(result.success === true, '创建应成功');
+  assert(result.card.focusMark === false, '新建复盘卡 focusMark 应为 false');
+});
+
+test('focusMark 字段 - 旧数据缺少 focusMark 时自动补齐', () => {
+  const raw = JSON.parse(localStorage.getItem('handover_review_cards') || '[]');
+  const legacyCards = raw.map(c => {
+    const { focusMark, ...rest } = c;
+    return rest;
+  });
+  localStorage.setItem('handover_review_cards', JSON.stringify(legacyCards));
+  const cards = Store.ReviewCards.getAll();
+  assert(cards.every(c => 'focusMark' in c), '迁移后所有复盘卡都应有 focusMark 字段');
+  assert(cards.every(c => c.focusMark === false), '迁移后 focusMark 默认为 false');
+});
+
+test('班长可以标记重点关注', () => {
+  Store.ReviewCards.saveAll([]);
+  const adminUser = Store.Users.getById('user_zhang');
+  const result = Store.ReviewCards.create({
+    sourceType: 'closed_item',
+    sourceId: 'focus_toggle_1',
+    sourceSummary: '标记重点测试',
+    hasRisk: true,
+    followUpDeadline: '2020-01-01'
+  }, adminUser);
+  const card = result.card;
+  assert(card.focusMark === false, '初始 focusMark 应为 false');
+  
+  const toggleResult = Store.ReviewCards.toggleFocusMark(card.id, adminUser);
+  assert(toggleResult.success === true, '标记重点应成功');
+  assert(toggleResult.card.focusMark === true, '标记后 focusMark 应为 true');
+  
+  const lastLog = toggleResult.card.logs[toggleResult.card.logs.length - 1];
+  assert(lastLog.action === '标记为重点关注', '日志操作应为标记为重点关注');
+  assert(lastLog.operatorName === '张三', '日志操作人应正确');
+  assert(lastLog.detail.includes('标记为重点关注'), '日志详情应包含标记信息');
+});
+
+test('班长可以取消重点关注', () => {
+  const adminUser = Store.Users.getById('user_zhang');
+  const cards = Store.ReviewCards.getAll();
+  const focusedCard = cards.find(c => c.focusMark === true);
+  if (focusedCard) {
+    const toggleResult = Store.ReviewCards.toggleFocusMark(focusedCard.id, adminUser);
+    assert(toggleResult.success === true, '取消重点应成功');
+    assert(toggleResult.card.focusMark === false, '取消后 focusMark 应为 false');
+    
+    const lastLog = toggleResult.card.logs[toggleResult.card.logs.length - 1];
+    assert(lastLog.action === '取消重点关注', '日志操作应为取消重点关注');
+  }
+});
+
+test('值班员不能修改重点标记', () => {
+  const cards = Store.ReviewCards.getAll();
+  if (cards.length > 0) {
+    const card = cards[0];
+    const opUser = Store.Users.getById('user_li');
+    const result = Store.ReviewCards.toggleFocusMark(card.id, opUser);
+    assert(result.success === false, '值班员修改重点标记应失败');
+    assert(result.error.includes('权限'), '错误信息应包含权限');
+    
+    const fresh = Store.ReviewCards.getById(card.id);
+    assert(fresh.focusMark === card.focusMark, '重点标记不应被修改');
+  }
+});
+
+test('观察员不能修改重点标记', () => {
+  const cards = Store.ReviewCards.getAll();
+  if (cards.length > 0) {
+    const card = cards[0];
+    const observerUser = Store.Users.getById('user_zhao');
+    const result = Store.ReviewCards.toggleFocusMark(card.id, observerUser);
+    assert(result.success === false, '观察员修改重点标记应失败');
+  }
+});
+
+test('重点关注标记随导出/恢复持久化', () => {
+  Store.ReviewCards.saveAll([]);
+  Store.RecoveryLogs.saveAll([]);
+  
+  const adminUser = Store.Users.getById('user_zhang');
+  const createResult = Store.ReviewCards.create({
+    sourceType: 'closed_item',
+    sourceId: 'focus_export_test',
+    sourceSummary: '重点标记导出测试',
+    hasRisk: true,
+    followUpDeadline: '2020-01-01',
+    conclusion: '导出测试'
+  }, adminUser);
+  
+  const toggleResult = Store.ReviewCards.toggleFocusMark(createResult.card.id, adminUser);
+  assert(toggleResult.card.focusMark === true, '标记后应为 true');
+  
+  const exportedData = Store.exportAllData();
+  const exportedCard = exportedData.reviewCards.find(c => c.id === createResult.card.id);
+  assert(exportedCard !== undefined, '导出应包含该复盘卡');
+  assert(exportedCard.focusMark === true, '导出的 focusMark 应为 true');
+  
+  Store.ReviewCards.saveAll([]);
+  assert(Store.ReviewCards.getAll().length === 0, '清空后应为空');
+  
+  const importResult = Store.executeImport(exportedData, adminUser);
+  assert(importResult.success === true, '恢复应成功');
+  
+  const restoredCard = Store.ReviewCards.getById(createResult.card.id);
+  assert(restoredCard !== null, '恢复后复盘卡应存在');
+  assert(restoredCard.focusMark === true, '恢复后 focusMark 应为 true');
+  
+  const focusLog = restoredCard.logs.find(l => l.action === '标记为重点关注');
+  assert(focusLog !== undefined, '恢复后应保留标记重点关注的日志');
+});
+
+test('恢复日志包含复盘卡数量对比', () => {
+  Store.RecoveryLogs.saveAll([]);
+  Store.ReviewCards.saveAll([]);
+  
+  const adminUser = Store.Users.getById('user_zhang');
+  Store.ReviewCards.create({
+    sourceType: 'closed_item',
+    sourceId: 'log_count_test',
+    sourceSummary: '日志数量测试',
+    conclusion: '测试'
+  }, adminUser);
+  
+  const exportedData = Store.exportAllData();
+  const originalReviewCount = exportedData.reviewCards.length;
+  
+  Store.ReviewCards.saveAll([]);
+  const importResult = Store.executeImport(exportedData, adminUser);
+  assert(importResult.success === true, '恢复应成功');
+  
+  const logs = Store.RecoveryLogs.getAll();
+  assert(logs.length >= 1, '应有恢复日志');
+  const log = logs[0];
+  assert('reviewCards' in log.beforeSummary, '恢复前摘要应包含 reviewCards');
+  assert('reviewCards' in log.afterSummary, '恢复后摘要应包含 reviewCards');
+  assert(log.beforeSummary.reviewCards === 0, '恢复前复盘卡数量应为0');
+  assert(log.afterSummary.reviewCards === originalReviewCount, '恢复后复盘卡数量应正确');
+});
+
+test('筛选条件 localStorage 持久化', () => {
+  const filters = {
+    hasRisk: true,
+    noRisk: false,
+    myResponsible: true,
+    overdue: false
+  };
+  Store.ReviewFilters.save(filters);
+  
+  const loaded = Store.ReviewFilters.get();
+  assert(loaded.hasRisk === true, 'hasRisk 应持久化为 true');
+  assert(loaded.noRisk === false, 'noRisk 应持久化为 false');
+  assert(loaded.myResponsible === true, 'myResponsible 应持久化为 true');
+  assert(loaded.overdue === false, 'overdue 应持久化为 false');
+  
+  Store.ReviewFilters.save({
+    hasRisk: false,
+    noRisk: false,
+    myResponsible: false,
+    overdue: false
+  });
+  const reset = Store.ReviewFilters.get();
+  assert(reset.hasRisk === false, '重置后 hasRisk 应为 false');
+});
+
+test('筛选逻辑 - 有遗留风险', () => {
+  Store.ReviewCards.saveAll([]);
+  const adminUser = Store.Users.getById('user_zhang');
+  Store.ReviewCards.create({
+    sourceType: 'closed_item',
+    sourceId: 'filter_risk_yes',
+    sourceSummary: '有风险',
+    hasRisk: true
+  }, adminUser);
+  Store.ReviewCards.create({
+    sourceType: 'closed_item',
+    sourceId: 'filter_risk_no',
+    sourceSummary: '无风险',
+    hasRisk: false
+  }, adminUser);
+  
+  const allCards = Store.ReviewCards.getAll();
+  const riskCards = allCards.filter(c => c.hasRisk);
+  const noRiskCards = allCards.filter(c => !c.hasRisk);
+  assert(riskCards.length >= 1, '应有至少1张有风险的卡');
+  assert(noRiskCards.length >= 1, '应有至少1张无风险的卡');
+});
+
+test('筛选逻辑 - 已逾期（有风险且截止时间已过）', () => {
+  Store.ReviewCards.saveAll([]);
+  const adminUser = Store.Users.getById('user_zhang');
+  
+  Store.ReviewCards.create({
+    sourceType: 'closed_item',
+    sourceId: 'overdue_yes',
+    sourceSummary: '已逾期',
+    hasRisk: true,
+    followUpDeadline: '2020-01-01'
+  }, adminUser);
+  Store.ReviewCards.create({
+    sourceType: 'closed_item',
+    sourceId: 'overdue_no_risk',
+    sourceSummary: '无风险不逾期',
+    hasRisk: false,
+    followUpDeadline: '2020-01-01'
+  }, adminUser);
+  Store.ReviewCards.create({
+    sourceType: 'closed_item',
+    sourceId: 'overdue_future',
+    sourceSummary: '未来截止',
+    hasRisk: true,
+    followUpDeadline: '2099-12-31'
+  }, adminUser);
+  Store.ReviewCards.create({
+    sourceType: 'closed_item',
+    sourceId: 'overdue_no_deadline',
+    sourceSummary: '无截止时间',
+    hasRisk: true
+  }, adminUser);
+  
+  const allCards = Store.ReviewCards.getAll();
+  function isOverdue(card) {
+    if (!card.followUpDeadline) return false;
+    if (!card.hasRisk) return false;
+    const deadline = new Date(card.followUpDeadline + 'T23:59:59');
+    return deadline < new Date();
+  }
+  
+  const overdueCards = allCards.filter(c => isOverdue(c));
+  assert(overdueCards.length === 1, '应只有1张已逾期的卡');
+  assert(overdueCards[0].sourceId === 'overdue_yes', '逾期卡应为 overdue_yes');
+});
+
+test('筛选逻辑 - 只看我负责', () => {
+  Store.ReviewCards.saveAll([]);
+  const adminUser = Store.Users.getById('user_zhang');
+  const opUser = Store.Users.getById('user_li');
+  
+  Store.ReviewCards.create({
+    sourceType: 'closed_item',
+    sourceId: 'my_resp_1',
+    sourceSummary: '我负责',
+    responsiblePersonId: 'user_zhang',
+    responsiblePersonName: '张三'
+  }, adminUser);
+  Store.ReviewCards.create({
+    sourceType: 'closed_item',
+    sourceId: 'my_resp_2',
+    sourceSummary: '别人负责',
+    responsiblePersonId: 'user_li',
+    responsiblePersonName: '李四'
+  }, adminUser);
+  
+  const allCards = Store.ReviewCards.getAll();
+  const myCards = allCards.filter(c => c.responsiblePersonId === 'user_zhang');
+  assert(myCards.length === 1, '张三只负责1张');
+  assert(myCards[0].sourceId === 'my_resp_1', '负责的卡应为 my_resp_1');
+});
+
+test('重点关注标记写入操作日志', () => {
+  Store.ReviewCards.saveAll([]);
+  const adminUser = Store.Users.getById('user_zhang');
+  const createResult = Store.ReviewCards.create({
+    sourceType: 'closed_item',
+    sourceId: 'log_test_focus',
+    sourceSummary: '日志测试'
+  }, adminUser);
+  const card = createResult.card;
+  const originalLogCount = card.logs.length;
+  
+  const toggle1 = Store.ReviewCards.toggleFocusMark(card.id, adminUser);
+  assert(toggle1.card.logs.length === originalLogCount + 1, '标记后应新增一条日志');
+  assert(toggle1.card.logs[originalLogCount].action === '标记为重点关注', '日志应为标记为重点关注');
+  assert(toggle1.card.logs[originalLogCount].operatorId === 'user_zhang', '日志操作人ID应正确');
+  assert(toggle1.card.logs[originalLogCount].operatorName === '张三', '日志操作人名称应正确');
+  
+  const toggle2 = Store.ReviewCards.toggleFocusMark(card.id, adminUser);
+  assert(toggle2.card.logs.length === originalLogCount + 2, '取消后再新增一条日志');
+  assert(toggle2.card.logs[originalLogCount + 1].action === '取消重点关注', '日志应为取消重点关注');
+});
+
+test('焦点标记与导出恢复 - 恢复后日志能看出复盘卡数量无异常变化', () => {
+  Store.ReviewCards.saveAll([]);
+  Store.RecoveryLogs.saveAll([]);
+  
+  const adminUser = Store.Users.getById('user_zhang');
+  Store.ReviewCards.create({
+    sourceType: 'closed_item',
+    sourceId: 'restore_count_1',
+    sourceSummary: '恢复数量测试1',
+    hasRisk: true,
+    followUpDeadline: '2020-01-01',
+    conclusion: '测试1'
+  }, adminUser);
+  Store.ReviewCards.create({
+    sourceType: 'closed_item',
+    sourceId: 'restore_count_2',
+    sourceSummary: '恢复数量测试2',
+    hasRisk: false,
+    conclusion: '测试2'
+  }, adminUser);
+  
+  const allCards = Store.ReviewCards.getAll();
+  const card1 = allCards.find(c => c.sourceId === 'restore_count_1');
+  Store.ReviewCards.toggleFocusMark(card1.id, adminUser);
+  
+  const exportedData = Store.exportAllData();
+  assert(exportedData.reviewCards.length === 2, '导出应有2张复盘卡');
+  
+  const importResult = Store.executeImport(exportedData, adminUser);
+  assert(importResult.success === true, '恢复应成功');
+  
+  const logs = Store.RecoveryLogs.getAll();
+  const latestLog = logs[0];
+  assert(latestLog.beforeSummary.reviewCards === 2, '恢复前复盘卡数量应为2');
+  assert(latestLog.afterSummary.reviewCards === 2, '恢复后复盘卡数量应为2');
+  
+  const restored = Store.ReviewCards.getAll();
+  assert(restored.length === 2, '恢复后实际复盘卡数量应为2');
+  const restored1 = restored.find(c => c.sourceId === 'restore_count_1');
+  assert(restored1.focusMark === true, '恢复后重点标记应保留');
+});
+
 console.log('\n=== 测试结果总结 ===');
 console.log(`通过: ${passed}`);
 console.log(`失败: ${failed}`);

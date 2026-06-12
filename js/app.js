@@ -67,6 +67,13 @@ createApp({
     });
     const isEditingReview = ref(false);
 
+    const reviewFilter = reactive({
+      hasRisk: false,
+      noRisk: false,
+      myResponsible: false,
+      overdue: false
+    });
+
     const toast = reactive({
       show: false,
       message: '',
@@ -215,6 +222,35 @@ createApp({
       return Store.ReviewCards.checkCanEditConclusion(currentUser.value);
     });
 
+    function isReviewCardOverdue(card) {
+      if (!card.followUpDeadline) return false;
+      if (!card.hasRisk) return false;
+      const deadline = new Date(card.followUpDeadline + 'T23:59:59');
+      return deadline < new Date();
+    }
+
+    const filteredReviewCards = computed(() => {
+      let result = reviewCards.value;
+      if (reviewFilter.hasRisk) {
+        result = result.filter(c => c.hasRisk);
+      }
+      if (reviewFilter.noRisk) {
+        result = result.filter(c => !c.hasRisk);
+      }
+      if (reviewFilter.myResponsible && currentUser.value) {
+        result = result.filter(c => c.responsiblePersonId === currentUser.value.id);
+      }
+      if (reviewFilter.overdue) {
+        result = result.filter(c => isReviewCardOverdue(c));
+      }
+      return result;
+    });
+
+    const canToggleFocusMark = computed(() => {
+      if (!currentUser.value) return false;
+      return Store.ReviewCards.checkCanEditConclusion(currentUser.value);
+    });
+
     const currentDataVersion = computed(() => {
       return Store.CURRENT_DATA_VERSION;
     });
@@ -239,6 +275,12 @@ createApp({
       handoverUserId.value = currentShiftData.handoverUserId || '';
 
       currentUserId.value = Store.CurrentUser.get();
+
+      const savedFilter = Store.ReviewFilters.get();
+      reviewFilter.hasRisk = savedFilter.hasRisk || false;
+      reviewFilter.noRisk = savedFilter.noRisk || false;
+      reviewFilter.myResponsible = savedFilter.myResponsible || false;
+      reviewFilter.overdue = savedFilter.overdue || false;
 
       checkItems.value.forEach(item => {
         if (!(item.id in confirmChecks)) {
@@ -1201,6 +1243,45 @@ createApp({
       }
     }
 
+    function toggleFocusMark(card, event) {
+      if (event) event.stopPropagation();
+      if (!currentUser.value) {
+        showToast('请先选择当前用户', 'error');
+        return;
+      }
+      if (!canToggleFocusMark.value) {
+        showToast('只有班长可以修改重点标记', 'error');
+        return;
+      }
+      const result = Store.ReviewCards.toggleFocusMark(card.id, currentUser.value);
+      if (result.success) {
+        showToast(card.focusMark ? '已取消重点关注' : '已标记为重点关注', 'success');
+        loadData();
+        if (selectedReviewCard.value && selectedReviewCard.value.id === card.id) {
+          selectedReviewCard.value = { ...result.card };
+        }
+      } else {
+        showToast(result.error || '操作失败', 'error');
+      }
+    }
+
+    function saveReviewFilter() {
+      Store.ReviewFilters.save({
+        hasRisk: reviewFilter.hasRisk,
+        noRisk: reviewFilter.noRisk,
+        myResponsible: reviewFilter.myResponsible,
+        overdue: reviewFilter.overdue
+      });
+    }
+
+    function resetReviewFilter() {
+      reviewFilter.hasRisk = false;
+      reviewFilter.noRisk = false;
+      reviewFilter.myResponsible = false;
+      reviewFilter.overdue = false;
+      saveReviewFilter();
+    }
+
     function getReviewBySourceId(sourceId) {
       return reviewCards.value.find(c => c.sourceId === sourceId) || null;
     }
@@ -1226,6 +1307,10 @@ createApp({
 
     onMounted(() => {
       loadData();
+
+      watch(() => ({ ...reviewFilter }), () => {
+        saveReviewFilter();
+      }, { deep: true });
 
       watch(showConfirmModal, (val) => {
         if (val) {
@@ -1292,6 +1377,7 @@ createApp({
       reviewFollowUpNote,
       reviewEditForm,
       isEditingReview,
+      reviewFilter,
 
       currentShift,
       currentUser,
@@ -1309,6 +1395,7 @@ createApp({
       canConfirm,
       canCreateReview,
       canEditReviewConclusion,
+      canToggleFocusMark,
 
       formatTime,
       formatIsoTime,
@@ -1317,6 +1404,8 @@ createApp({
       getStatusName,
       getHandoverStatusName,
       getDiffLabel,
+      isReviewCardOverdue,
+      filteredReviewCards,
 
       addShift,
       removeShift,
@@ -1352,6 +1441,9 @@ createApp({
       saveReviewConclusion,
       addReviewFollowUp,
       deleteReviewCard,
+      toggleFocusMark,
+      saveReviewFilter,
+      resetReviewFilter,
       getReviewBySourceId,
 
       filterHistory,

@@ -9,7 +9,8 @@ const Store = (function() {
     HANDOVER_RECORDS: 'handover_records',
     CURRENT_USER_ID: 'handover_current_user',
     RECOVERY_LOGS: 'handover_recovery_logs',
-    REVIEW_CARDS: 'handover_review_cards'
+    REVIEW_CARDS: 'handover_review_cards',
+    REVIEW_FILTERS: 'handover_review_filters'
   };
 
   const CURRENT_DATA_VERSION = '1.1';
@@ -365,26 +366,54 @@ const Store = (function() {
     }
   };
 
+  const ReviewFilters = {
+    get() {
+      return getFromStorage(STORAGE_KEYS.REVIEW_FILTERS, {
+        hasRisk: false,
+        noRisk: false,
+        myResponsible: false,
+        overdue: false
+      });
+    },
+    save(filters) {
+      return saveToStorage(STORAGE_KEYS.REVIEW_FILTERS, filters);
+    }
+  };
+
   const ReviewCards = {
     getAll() {
       const raw = getFromStorage(STORAGE_KEYS.REVIEW_CARDS, []);
       const seen = new Map();
-      for (const card of raw) {
-        if (!card || !card.sourceId) continue;
+      let needsSave = false;
+      const migrated = raw.map(card => {
+        if (!card || !card.sourceId) return null;
+        if (!('focusMark' in card)) {
+          needsSave = true;
+          card.focusMark = false;
+        }
+        return card;
+      }).filter(Boolean);
+      for (const card of migrated) {
         if (!seen.has(card.sourceId) || card.createTime < seen.get(card.sourceId).createTime) {
           seen.set(card.sourceId, card);
         }
       }
       const deduped = Array.from(seen.values());
-      if (deduped.length !== raw.length) {
+      if (needsSave || deduped.length !== raw.length) {
         saveToStorage(STORAGE_KEYS.REVIEW_CARDS, deduped);
       }
       return deduped;
     },
     saveAll(cards) {
       const seen = new Map();
-      for (const card of cards) {
-        if (!card || !card.sourceId) continue;
+      const migrated = cards.map(card => {
+        if (!card || !card.sourceId) return null;
+        if (!('focusMark' in card)) {
+          card.focusMark = false;
+        }
+        return card;
+      }).filter(Boolean);
+      for (const card of migrated) {
         if (!seen.has(card.sourceId) || card.createTime < seen.get(card.sourceId).createTime) {
           seen.set(card.sourceId, card);
         }
@@ -418,6 +447,7 @@ const Store = (function() {
         responsiblePersonName: data.responsiblePersonName || '',
         followUpDeadline: data.followUpDeadline || '',
         conclusion: data.conclusion || '',
+        focusMark: false,
         followUpNotes: [],
         logs: [{
           action: '创建复盘卡',
@@ -515,6 +545,29 @@ const Store = (function() {
       cards.splice(index, 1);
       this.saveAll(cards);
       return { success: true };
+    },
+    toggleFocusMark(id, operator) {
+      const cards = this.getAll();
+      const index = cards.findIndex(c => c.id === id);
+      if (index === -1) return { success: false, error: '复盘卡不存在' };
+      const operatorRole = Roles.getById(operator.roleId);
+      if (!operatorRole || operatorRole.id !== 'role_admin') {
+        return { success: false, error: '权限不足，只有班长可以修改重点标记' };
+      }
+      const card = cards[index];
+      const oldMark = card.focusMark || false;
+      card.focusMark = !oldMark;
+      card.updateTime = Date.now();
+      card.logs.push({
+        action: card.focusMark ? '标记为重点关注' : '取消重点关注',
+        operatorId: operator.id,
+        operatorName: operator.name,
+        time: card.updateTime,
+        detail: card.focusMark ? '将该复盘卡标记为重点关注' : '取消该复盘卡的重点关注标记'
+      });
+      cards[index] = card;
+      this.saveAll(cards);
+      return { success: true, card };
     },
     checkCanEditConclusion(user) {
       if (!user || !user.roleId) return false;
@@ -906,6 +959,7 @@ const Store = (function() {
     HandoverRecords,
     RecoveryLogs,
     ReviewCards,
+    ReviewFilters,
     createSampleData,
     exportAllData,
     validateImportStructure,
