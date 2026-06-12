@@ -12,6 +12,7 @@ createApp({
     const items = ref([]);
     const handoverRecords = ref([]);
     const recoveryLogs = ref([]);
+    const reviewCards = ref([]);
 
     const currentShiftId = ref('');
     const currentShiftDate = ref('');
@@ -40,6 +41,31 @@ createApp({
     const importError = ref('');
 
     const editingBaseVersion = ref(0);
+
+    const showReviewModal = ref(false);
+    const showReviewDetailModal = ref(false);
+    const selectedReviewCard = ref(null);
+    const reviewForm = reactive({
+      sourceType: '',
+      sourceId: '',
+      sourceSummary: '',
+      hasRisk: false,
+      riskDescription: '',
+      responsiblePersonId: '',
+      responsiblePersonName: '',
+      followUpDeadline: '',
+      conclusion: ''
+    });
+    const reviewFollowUpNote = ref('');
+    const reviewEditForm = reactive({
+      hasRisk: false,
+      riskDescription: '',
+      responsiblePersonId: '',
+      responsiblePersonName: '',
+      followUpDeadline: '',
+      conclusion: ''
+    });
+    const isEditingReview = ref(false);
 
     const toast = reactive({
       show: false,
@@ -179,6 +205,16 @@ createApp({
       return currentUserRole.value.canConfirm;
     });
 
+    const canCreateReview = computed(() => {
+      if (!currentUser.value) return false;
+      return Store.ReviewCards.checkCanEditConclusion(currentUser.value);
+    });
+
+    const canEditReviewConclusion = computed(() => {
+      if (!currentUser.value) return false;
+      return Store.ReviewCards.checkCanEditConclusion(currentUser.value);
+    });
+
     const currentDataVersion = computed(() => {
       return Store.CURRENT_DATA_VERSION;
     });
@@ -195,6 +231,7 @@ createApp({
       items.value = Store.Items.getAll();
       handoverRecords.value = Store.HandoverRecords.getAll();
       recoveryLogs.value = Store.RecoveryLogs.getAll();
+      reviewCards.value = Store.ReviewCards.getAll();
 
       const currentShiftData = Store.CurrentShift.get();
       currentShiftId.value = currentShiftData.shiftId || '';
@@ -756,6 +793,33 @@ createApp({
         content += `\n`;
       });
 
+      const relatedReviews = reviewCards.value.filter(c => {
+        if (c.sourceType === 'closed_item') {
+          return currentItems.some(i => i.id === c.sourceId);
+        }
+        return false;
+      });
+      if (relatedReviews.length > 0) {
+        content += `-------------------------------------\n`;
+        content += `          交接复盘信息\n`;
+        content += `-------------------------------------\n\n`;
+        relatedReviews.forEach((card, index) => {
+          content += `${index + 1}. 复盘卡\n`;
+          content += `   原始摘要：${card.sourceSummary}\n`;
+          content += `   遗留风险：${card.hasRisk ? '是' : '否'}${card.hasRisk && card.riskDescription ? ' - ' + card.riskDescription : ''}\n`;
+          content += `   责任人：${card.responsiblePersonName || '未指定'}\n`;
+          content += `   截止时间：${card.followUpDeadline || '未设置'}\n`;
+          content += `   复盘结论：${card.conclusion || '暂无'}\n`;
+          if (card.followUpNotes.length > 0) {
+            content += `   跟进说明：\n`;
+            card.followUpNotes.forEach(note => {
+              content += `     - [${formatTime(note.time)}] ${note.operatorName}：${note.content}\n`;
+            });
+          }
+          content += `\n`;
+        });
+      }
+
       content += `=====================================\n`;
       content += `       交接单结束\n`;
       content += `=====================================\n`;
@@ -801,6 +865,25 @@ createApp({
         content += `\n`;
       });
 
+      const recordReview = reviewCards.value.find(c => c.sourceId === record.id);
+      if (recordReview) {
+        content += `-------------------------------------\n`;
+        content += `          交接复盘信息\n`;
+        content += `-------------------------------------\n\n`;
+        content += `原始摘要：${recordReview.sourceSummary}\n`;
+        content += `遗留风险：${recordReview.hasRisk ? '是' : '否'}${recordReview.hasRisk && recordReview.riskDescription ? ' - ' + recordReview.riskDescription : ''}\n`;
+        content += `责任人：${recordReview.responsiblePersonName || '未指定'}\n`;
+        content += `截止时间：${recordReview.followUpDeadline || '未设置'}\n`;
+        content += `复盘结论：${recordReview.conclusion || '暂无'}\n`;
+        if (recordReview.followUpNotes.length > 0) {
+          content += `跟进说明：\n`;
+          recordReview.followUpNotes.forEach(note => {
+            content += `  - [${formatTime(note.time)}] ${note.operatorName}：${note.content}\n`;
+          });
+        }
+        content += `\n`;
+      }
+
       content += `=====================================\n`;
       content += `       交接单结束\n`;
       content += `=====================================\n`;
@@ -844,7 +927,8 @@ createApp({
         checkItems: '检查项',
         items: '事项',
         handoverRecords: '交接记录',
-        recoveryLogs: '恢复日志'
+        recoveryLogs: '恢复日志',
+        reviewCards: '复盘卡'
       };
       return labels[key] || key;
     }
@@ -943,6 +1027,176 @@ createApp({
       }
     }
 
+    function openCreateReviewFromItem(item) {
+      if (!currentUser.value) {
+        showToast('请先选择当前用户', 'error');
+        return;
+      }
+      if (!canCreateReview.value) {
+        showToast('只有班长可以创建复盘卡', 'error');
+        return;
+      }
+      const existing = Store.ReviewCards.getBySourceId(item.id);
+      if (existing) {
+        showToast('该事项已有复盘卡', 'warning');
+        openReviewDetail(existing);
+        return;
+      }
+      reviewForm.sourceType = 'closed_item';
+      reviewForm.sourceId = item.id;
+      reviewForm.sourceSummary = `[${getItemTypeName(item.type)}] ${item.title}${item.closeReason ? '（关闭原因：' + item.closeReason + '）' : ''}`;
+      reviewForm.hasRisk = false;
+      reviewForm.riskDescription = '';
+      reviewForm.responsiblePersonId = item.assigneeId || '';
+      reviewForm.responsiblePersonName = item.assigneeName || '';
+      reviewForm.followUpDeadline = '';
+      reviewForm.conclusion = '';
+      showReviewModal.value = true;
+    }
+
+    function openCreateReviewFromRecord(record) {
+      if (!currentUser.value) {
+        showToast('请先选择当前用户', 'error');
+        return;
+      }
+      if (!canCreateReview.value) {
+        showToast('只有班长可以创建复盘卡', 'error');
+        return;
+      }
+      const existing = Store.ReviewCards.getBySourceId(record.id);
+      if (existing) {
+        showToast('该交接记录已有复盘卡', 'warning');
+        openReviewDetail(existing);
+        return;
+      }
+      const itemSummary = (record.itemsSnapshot || []).map(i =>
+        `[${getItemTypeName(i.type)}] ${i.title}（${getStatusName(i.status)}）`
+      ).join('；');
+      reviewForm.sourceType = 'handover_record';
+      reviewForm.sourceId = record.id;
+      reviewForm.sourceSummary = `${record.shiftName} ${record.date} 交班人：${record.handoverName}，事项：${itemSummary || '无'}`;
+      reviewForm.hasRisk = false;
+      reviewForm.riskDescription = '';
+      reviewForm.responsiblePersonId = '';
+      reviewForm.responsiblePersonName = '';
+      reviewForm.followUpDeadline = '';
+      reviewForm.conclusion = '';
+      showReviewModal.value = true;
+    }
+
+    function saveReviewCard() {
+      if (!currentUser.value) {
+        showToast('请先选择当前用户', 'error');
+        return;
+      }
+      const card = Store.ReviewCards.create({
+        sourceType: reviewForm.sourceType,
+        sourceId: reviewForm.sourceId,
+        sourceSummary: reviewForm.sourceSummary,
+        hasRisk: reviewForm.hasRisk,
+        riskDescription: reviewForm.riskDescription,
+        responsiblePersonId: reviewForm.responsiblePersonId,
+        responsiblePersonName: reviewForm.responsiblePersonName,
+        followUpDeadline: reviewForm.followUpDeadline,
+        conclusion: reviewForm.conclusion
+      }, currentUser.value);
+      showToast('复盘卡已创建', 'success');
+      showReviewModal.value = false;
+      loadData();
+      openReviewDetail(card);
+    }
+
+    function openReviewDetail(card) {
+      const fresh = Store.ReviewCards.getById(card.id);
+      if (!fresh) {
+        showToast('复盘卡不存在', 'error');
+        return;
+      }
+      selectedReviewCard.value = { ...fresh };
+      isEditingReview.value = false;
+      reviewFollowUpNote.value = '';
+      reviewEditForm.hasRisk = fresh.hasRisk;
+      reviewEditForm.riskDescription = fresh.riskDescription;
+      reviewEditForm.responsiblePersonId = fresh.responsiblePersonId;
+      reviewEditForm.responsiblePersonName = fresh.responsiblePersonName;
+      reviewEditForm.followUpDeadline = fresh.followUpDeadline;
+      reviewEditForm.conclusion = fresh.conclusion;
+      showReviewDetailModal.value = true;
+    }
+
+    function saveReviewConclusion() {
+      if (!currentUser.value) {
+        showToast('请先选择当前用户', 'error');
+        return;
+      }
+      if (!selectedReviewCard.value) return;
+      const assigneeUser = users.value.find(u => u.id === reviewEditForm.responsiblePersonId);
+      const result = Store.ReviewCards.updateConclusion(
+        selectedReviewCard.value.id,
+        {
+          hasRisk: reviewEditForm.hasRisk,
+          riskDescription: reviewEditForm.riskDescription,
+          responsiblePersonId: reviewEditForm.responsiblePersonId,
+          responsiblePersonName: assigneeUser ? assigneeUser.name : reviewEditForm.responsiblePersonName,
+          followUpDeadline: reviewEditForm.followUpDeadline,
+          conclusion: reviewEditForm.conclusion
+        },
+        currentUser.value
+      );
+      if (result.success) {
+        showToast('复盘信息已更新', 'success');
+        isEditingReview.value = false;
+        loadData();
+        selectedReviewCard.value = { ...result.card };
+      } else {
+        showToast(result.error || '更新失败', 'error');
+      }
+    }
+
+    function addReviewFollowUp() {
+      if (!currentUser.value) {
+        showToast('请先选择当前用户', 'error');
+        return;
+      }
+      if (!reviewFollowUpNote.value.trim()) {
+        showToast('请输入跟进说明', 'error');
+        return;
+      }
+      if (!selectedReviewCard.value) return;
+      const result = Store.ReviewCards.addFollowUpNote(
+        selectedReviewCard.value.id,
+        reviewFollowUpNote.value.trim(),
+        currentUser.value
+      );
+      if (result.success) {
+        showToast('跟进说明已添加', 'success');
+        reviewFollowUpNote.value = '';
+        loadData();
+        selectedReviewCard.value = { ...result.card };
+      } else {
+        showToast(result.error || '添加失败', 'error');
+      }
+    }
+
+    function deleteReviewCard() {
+      if (!currentUser.value) return;
+      if (!selectedReviewCard.value) return;
+      if (!confirm('确定删除该复盘卡吗？此操作不可撤销！')) return;
+      const result = Store.ReviewCards.deleteCard(selectedReviewCard.value.id, currentUser.value);
+      if (result.success) {
+        showToast('复盘卡已删除', 'success');
+        showReviewDetailModal.value = false;
+        selectedReviewCard.value = null;
+        loadData();
+      } else {
+        showToast(result.error || '删除失败', 'error');
+      }
+    }
+
+    function getReviewBySourceId(sourceId) {
+      return reviewCards.value.find(c => c.sourceId === sourceId) || null;
+    }
+
     function testVersionConflict() {
       console.log('=== 版本冲突测试 ===');
       const testItem = items.value[0];
@@ -997,6 +1251,7 @@ createApp({
       items,
       handoverRecords,
       recoveryLogs,
+      reviewCards,
       currentShiftId,
       currentShiftDate,
       handoverUserId,
@@ -1007,6 +1262,8 @@ createApp({
       showConfirmModal,
       showConflictModal,
       showImportPreviewModal,
+      showReviewModal,
+      showReviewDetailModal,
       editingItem,
       selectedItem,
       closeReason,
@@ -1022,6 +1279,11 @@ createApp({
       historyFilter,
       filteredHistory,
       itemForm,
+      selectedReviewCard,
+      reviewForm,
+      reviewFollowUpNote,
+      reviewEditForm,
+      isEditingReview,
 
       currentShift,
       currentUser,
@@ -1037,6 +1299,8 @@ createApp({
       canSubmitForConfirm,
       canCloseItem,
       canConfirm,
+      canCreateReview,
+      canEditReviewConclusion,
 
       formatTime,
       formatIsoTime,
@@ -1072,6 +1336,15 @@ createApp({
       confirmHandover,
       exportHandover,
       exportSingleHandover,
+
+      openCreateReviewFromItem,
+      openCreateReviewFromRecord,
+      saveReviewCard,
+      openReviewDetail,
+      saveReviewConclusion,
+      addReviewFollowUp,
+      deleteReviewCard,
+      getReviewBySourceId,
 
       filterHistory,
       resetHistoryFilter,

@@ -8,7 +8,8 @@ const Store = (function() {
     CURRENT_SHIFT: 'handover_current_shift',
     HANDOVER_RECORDS: 'handover_records',
     CURRENT_USER_ID: 'handover_current_user',
-    RECOVERY_LOGS: 'handover_recovery_logs'
+    RECOVERY_LOGS: 'handover_recovery_logs',
+    REVIEW_CARDS: 'handover_review_cards'
   };
 
   const CURRENT_DATA_VERSION = '1.1';
@@ -364,6 +365,137 @@ const Store = (function() {
     }
   };
 
+  const ReviewCards = {
+    getAll() {
+      return getFromStorage(STORAGE_KEYS.REVIEW_CARDS, []);
+    },
+    saveAll(cards) {
+      return saveToStorage(STORAGE_KEYS.REVIEW_CARDS, cards);
+    },
+    getById(id) {
+      return this.getAll().find(c => c.id === id) || null;
+    },
+    getBySourceId(sourceId) {
+      return this.getAll().find(c => c.sourceId === sourceId) || null;
+    },
+    create(data, operator) {
+      const now = Date.now();
+      const card = {
+        id: generateId('review'),
+        sourceType: data.sourceType,
+        sourceId: data.sourceId,
+        sourceSummary: data.sourceSummary || '',
+        hasRisk: data.hasRisk || false,
+        riskDescription: data.riskDescription || '',
+        responsiblePersonId: data.responsiblePersonId || '',
+        responsiblePersonName: data.responsiblePersonName || '',
+        followUpDeadline: data.followUpDeadline || '',
+        conclusion: data.conclusion || '',
+        followUpNotes: [],
+        logs: [{
+          action: '创建复盘卡',
+          operatorId: operator.id,
+          operatorName: operator.name,
+          time: now,
+          detail: `创建复盘卡，来源：${data.sourceType === 'handover_record' ? '交接记录' : '已关闭事项'}`
+        }],
+        creatorId: operator.id,
+        creatorName: operator.name,
+        createTime: now,
+        updateTime: now
+      };
+      const cards = this.getAll();
+      cards.push(card);
+      this.saveAll(cards);
+      return card;
+    },
+    updateConclusion(id, data, operator) {
+      const cards = this.getAll();
+      const index = cards.findIndex(c => c.id === id);
+      if (index === -1) return { success: false, error: '复盘卡不存在' };
+      const card = cards[index];
+      const operatorRole = Roles.getById(operator.roleId);
+      if (!operatorRole || operatorRole.id !== 'role_admin') {
+        return { success: false, error: '权限不足，只有班长可以修改复盘结论' };
+      }
+      const changes = [];
+      if (data.hasRisk !== undefined && data.hasRisk !== card.hasRisk) {
+        changes.push(`遗留风险：${card.hasRisk ? '是' : '否'} → ${data.hasRisk ? '是' : '否'}`);
+        card.hasRisk = data.hasRisk;
+      }
+      if (data.riskDescription !== undefined && data.riskDescription !== card.riskDescription) {
+        changes.push('风险描述已更新');
+        card.riskDescription = data.riskDescription;
+      }
+      if (data.responsiblePersonId !== undefined && data.responsiblePersonId !== card.responsiblePersonId) {
+        changes.push(`责任人：${card.responsiblePersonName || '无'} → ${data.responsiblePersonName || '无'}`);
+        card.responsiblePersonId = data.responsiblePersonId;
+        card.responsiblePersonName = data.responsiblePersonName || '';
+      }
+      if (data.followUpDeadline !== undefined && data.followUpDeadline !== card.followUpDeadline) {
+        changes.push(`跟进截止时间：${card.followUpDeadline || '无'} → ${data.followUpDeadline || '无'}`);
+        card.followUpDeadline = data.followUpDeadline;
+      }
+      if (data.conclusion !== undefined && data.conclusion !== card.conclusion) {
+        changes.push('复盘结论已更新');
+        card.conclusion = data.conclusion;
+      }
+      card.updateTime = Date.now();
+      card.logs.push({
+        action: '修改复盘结论',
+        operatorId: operator.id,
+        operatorName: operator.name,
+        time: card.updateTime,
+        detail: changes.join('；') || '更新复盘信息'
+      });
+      cards[index] = card;
+      this.saveAll(cards);
+      return { success: true, card };
+    },
+    addFollowUpNote(id, note, operator) {
+      const cards = this.getAll();
+      const index = cards.findIndex(c => c.id === id);
+      if (index === -1) return { success: false, error: '复盘卡不存在' };
+      const card = cards[index];
+      const now = Date.now();
+      card.followUpNotes.push({
+        id: generateId('note'),
+        content: note,
+        operatorId: operator.id,
+        operatorName: operator.name,
+        time: now
+      });
+      card.updateTime = now;
+      card.logs.push({
+        action: '添加跟进说明',
+        operatorId: operator.id,
+        operatorName: operator.name,
+        time: now,
+        detail: `添加跟进说明：${note.substring(0, 50)}${note.length > 50 ? '...' : ''}`
+      });
+      cards[index] = card;
+      this.saveAll(cards);
+      return { success: true, card };
+    },
+    deleteCard(id, operator) {
+      const cards = this.getAll();
+      const index = cards.findIndex(c => c.id === id);
+      if (index === -1) return { success: false, error: '复盘卡不存在' };
+      const operatorRole = Roles.getById(operator.roleId);
+      if (!operatorRole || operatorRole.id !== 'role_admin') {
+        return { success: false, error: '权限不足，只有班长可以删除复盘卡' };
+      }
+      cards.splice(index, 1);
+      this.saveAll(cards);
+      return { success: true };
+    },
+    checkCanEditConclusion(user) {
+      if (!user || !user.roleId) return false;
+      const role = Roles.getById(user.roleId);
+      return role && role.id === 'role_admin';
+    }
+  };
+
   function createSampleData() {
     const sampleRoles = [
       { id: 'role_admin', name: '班长', canCreate: true, canProcess: true, canClose: true, canConfirm: true, canManageConfig: true },
@@ -450,6 +582,7 @@ const Store = (function() {
       currentShift: CurrentShift.get(),
       handoverRecords: HandoverRecords.getAll(),
       recoveryLogs: RecoveryLogs.getAll(),
+      reviewCards: ReviewCards.getAll(),
       exportTime: new Date().toISOString(),
       version: CURRENT_DATA_VERSION
     };
@@ -458,7 +591,7 @@ const Store = (function() {
   function validateImportStructure(data) {
     const errors = [];
     const requiredFields = ['version', 'exportTime'];
-    const arrayFields = ['shifts', 'roles', 'users', 'checkItems', 'items', 'handoverRecords'];
+    const arrayFields = ['shifts', 'roles', 'users', 'checkItems', 'items', 'handoverRecords', 'reviewCards'];
 
     if (typeof data !== 'object' || data === null) {
       return { valid: false, errors: ['数据格式错误，应为 JSON 对象'] };
@@ -601,6 +734,7 @@ const Store = (function() {
       items: importData.items ? importData.items.length : 0,
       handoverRecords: importData.handoverRecords ? importData.handoverRecords.length : 0,
       recoveryLogs: importData.recoveryLogs ? importData.recoveryLogs.length : 0,
+      reviewCards: importData.reviewCards ? importData.reviewCards.length : 0,
       exportTime: importData.exportTime,
       version: importData.version
     };
@@ -615,12 +749,13 @@ const Store = (function() {
       items: Items.getAll().length,
       handoverRecords: HandoverRecords.getAll().length,
       recoveryLogs: RecoveryLogs.getAll().length,
+      reviewCards: ReviewCards.getAll().length,
       version: CURRENT_DATA_VERSION
     };
   }
 
   function calculateDifferences(importSummary, currentSummary) {
-    const fields = ['shifts', 'roles', 'users', 'checkItems', 'items', 'handoverRecords', 'recoveryLogs'];
+    const fields = ['shifts', 'roles', 'users', 'checkItems', 'items', 'handoverRecords', 'recoveryLogs', 'reviewCards'];
     const differences = {};
     let totalChanges = 0;
 
@@ -703,6 +838,7 @@ const Store = (function() {
       if (data.currentShift) CurrentShift.save(data.currentShift);
       if (data.handoverRecords) HandoverRecords.saveAll(data.handoverRecords);
       if (data.recoveryLogs) RecoveryLogs.saveAll(data.recoveryLogs);
+      if (data.reviewCards) ReviewCards.saveAll(data.reviewCards);
 
       const afterSummary = getCurrentDataSummary();
 
@@ -742,6 +878,7 @@ const Store = (function() {
     CurrentUser,
     HandoverRecords,
     RecoveryLogs,
+    ReviewCards,
     createSampleData,
     exportAllData,
     validateImportStructure,

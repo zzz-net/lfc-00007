@@ -982,6 +982,287 @@ test('恢复日志功能', () => {
   assert(logs[0].timestamp, '日志应有时间戳');
 });
 
+console.log('\n--- 8. 交接复盘测试 ---\n');
+
+test('创建复盘卡 - 从已关闭事项', () => {
+  Store.ReviewCards.saveAll([]);
+  
+  const adminUser = Store.Users.getById('user_zhang');
+  const items = Store.Items.getAll();
+  const closedItem = items.find(i => i.status === 'closed');
+  
+  if (closedItem) {
+    const card = Store.ReviewCards.create({
+      sourceType: 'closed_item',
+      sourceId: closedItem.id,
+      sourceSummary: `[${closedItem.type}] ${closedItem.title}`,
+      hasRisk: true,
+      riskDescription: '磁盘空间可能再次告警',
+      responsiblePersonId: 'user_li',
+      responsiblePersonName: '李四',
+      followUpDeadline: '2026-07-01',
+      conclusion: '需增加磁盘监控阈值'
+    }, adminUser);
+    
+    assert(card.id, '复盘卡应有ID');
+    assert(card.sourceType === 'closed_item', '来源类型应为已关闭事项');
+    assert(card.sourceId === closedItem.id, '来源ID应正确');
+    assert(card.hasRisk === true, '遗留风险应为true');
+    assert(card.riskDescription === '磁盘空间可能再次告警', '风险描述应正确');
+    assert(card.responsiblePersonId === 'user_li', '责任人ID应正确');
+    assert(card.responsiblePersonName === '李四', '责任人名称应正确');
+    assert(card.followUpDeadline === '2026-07-01', '截止时间应正确');
+    assert(card.conclusion === '需增加磁盘监控阈值', '复盘结论应正确');
+    assert(card.followUpNotes.length === 0, '初始跟进说明应为空');
+    assert(card.logs.length === 1, '初始应有一条操作日志');
+    assert(card.logs[0].action === '创建复盘卡', '日志操作应为创建复盘卡');
+    assert(card.creatorId === 'user_zhang', '创建人ID应正确');
+    assert(card.creatorName === '张三', '创建人名称应正确');
+  }
+});
+
+test('创建复盘卡 - 从交接记录', () => {
+  const adminUser = Store.Users.getById('user_zhang');
+  const records = Store.HandoverRecords.getAll();
+  
+  if (records.length > 0) {
+    const record = records[0];
+    const existing = Store.ReviewCards.getBySourceId(record.id);
+    if (!existing) {
+      const card = Store.ReviewCards.create({
+        sourceType: 'handover_record',
+        sourceId: record.id,
+        sourceSummary: `${record.shiftName} ${record.date}`,
+        hasRisk: false,
+        conclusion: '本次交接顺利'
+      }, adminUser);
+      
+      assert(card.sourceType === 'handover_record', '来源类型应为交接记录');
+      assert(card.sourceId === record.id, '来源ID应正确');
+      assert(card.hasRisk === false, '遗留风险应为false');
+    }
+  }
+});
+
+test('复盘卡权限不足 - 值班员不能修改结论', () => {
+  const cards = Store.ReviewCards.getAll();
+  if (cards.length > 0) {
+    const card = cards[0];
+    const opUser = Store.Users.getById('user_li');
+    
+    const result = Store.ReviewCards.updateConclusion(card.id, {
+      conclusion: '值班员试图修改结论'
+    }, opUser);
+    
+    assert(result.success === false, '值班员修改结论应失败');
+    assert(result.error.includes('权限'), '错误信息应包含权限');
+    
+    const fresh = Store.ReviewCards.getById(card.id);
+    assert(fresh.conclusion !== '值班员试图修改结论', '结论不应被修改');
+  }
+});
+
+test('复盘卡权限不足 - 值班员不能删除', () => {
+  const cards = Store.ReviewCards.getAll();
+  if (cards.length > 0) {
+    const card = cards[0];
+    const opUser = Store.Users.getById('user_li');
+    
+    const result = Store.ReviewCards.deleteCard(card.id, opUser);
+    assert(result.success === false, '值班员删除复盘卡应失败');
+    assert(result.error.includes('权限'), '错误信息应包含权限');
+    
+    const stillExists = Store.ReviewCards.getById(card.id);
+    assert(stillExists !== null, '复盘卡仍应存在');
+  }
+});
+
+test('复盘卡权限不足 - 观察员不能修改结论', () => {
+  const cards = Store.ReviewCards.getAll();
+  if (cards.length > 0) {
+    const card = cards[0];
+    const observerUser = Store.Users.getById('user_zhao');
+    
+    const result = Store.ReviewCards.updateConclusion(card.id, {
+      conclusion: '观察员试图修改结论'
+    }, observerUser);
+    
+    assert(result.success === false, '观察员修改结论应失败');
+  }
+});
+
+test('修改复盘卡留痕 - 班长修改结论写入日志', () => {
+  const cards = Store.ReviewCards.getAll();
+  if (cards.length > 0) {
+    const card = cards[0];
+    const adminUser = Store.Users.getById('user_zhang');
+    const originalLogCount = card.logs.length;
+    
+    const result = Store.ReviewCards.updateConclusion(card.id, {
+      hasRisk: false,
+      conclusion: '更新后的复盘结论'
+    }, adminUser);
+    
+    assert(result.success === true, '班长修改结论应成功');
+    assert(result.card.conclusion === '更新后的复盘结论', '结论应已更新');
+    assert(result.card.hasRisk === false, '风险标记应已更新');
+    assert(result.card.logs.length === originalLogCount + 1, '应新增一条操作日志');
+    
+    const lastLog = result.card.logs[result.card.logs.length - 1];
+    assert(lastLog.action === '修改复盘结论', '日志操作应为修改复盘结论');
+    assert(lastLog.operatorName === '张三', '日志操作人应正确');
+    assert(lastLog.detail.includes('遗留风险'), '日志应包含遗留风险变更');
+    assert(lastLog.detail.includes('复盘结论已更新'), '日志应包含结论更新');
+  }
+});
+
+test('普通值班员可以添加跟进说明', () => {
+  const cards = Store.ReviewCards.getAll();
+  if (cards.length > 0) {
+    const card = cards[0];
+    const opUser = Store.Users.getById('user_li');
+    const originalNoteCount = card.followUpNotes.length;
+    const originalLogCount = card.logs.length;
+    
+    const result = Store.ReviewCards.addFollowUpNote(card.id, '已确认磁盘清理完成，后续观察中', opUser);
+    
+    assert(result.success === true, '添加跟进说明应成功');
+    assert(result.card.followUpNotes.length === originalNoteCount + 1, '跟进说明应增加');
+    assert(result.card.followUpNotes[result.card.followUpNotes.length - 1].content === '已确认磁盘清理完成，后续观察中', '跟进说明内容应正确');
+    assert(result.card.followUpNotes[result.card.followUpNotes.length - 1].operatorName === '李四', '跟进说明操作人应正确');
+    assert(result.card.logs.length === originalLogCount + 1, '应新增一条操作日志');
+    
+    const lastLog = result.card.logs[result.card.logs.length - 1];
+    assert(lastLog.action === '添加跟进说明', '日志操作应为添加跟进说明');
+  }
+});
+
+test('班长删除复盘卡', () => {
+  const adminUser = Store.Users.getById('user_zhang');
+  const testCard = Store.ReviewCards.create({
+    sourceType: 'closed_item',
+    sourceId: 'test_delete_item',
+    sourceSummary: '测试删除',
+    conclusion: '待删除'
+  }, adminUser);
+  
+  const cardId = testCard.id;
+  assert(Store.ReviewCards.getById(cardId) !== null, '复盘卡应存在');
+  
+  const result = Store.ReviewCards.deleteCard(cardId, adminUser);
+  assert(result.success === true, '班长删除复盘卡应成功');
+  assert(Store.ReviewCards.getById(cardId) === null, '删除后复盘卡不应存在');
+});
+
+test('同一来源不能重复创建复盘卡', () => {
+  Store.ReviewCards.saveAll([]);
+  
+  const adminUser = Store.Users.getById('user_zhang');
+  Store.ReviewCards.create({
+    sourceType: 'closed_item',
+    sourceId: 'dup_test_item',
+    sourceSummary: '测试重复'
+  }, adminUser);
+  
+  const existing = Store.ReviewCards.getBySourceId('dup_test_item');
+  assert(existing !== null, '第一次创建应成功');
+  
+  Store.ReviewCards.create({
+    sourceType: 'closed_item',
+    sourceId: 'dup_test_item',
+    sourceSummary: '重复创建'
+  }, adminUser);
+  
+  const allCards = Store.ReviewCards.getAll();
+  const dupCount = allCards.filter(c => c.sourceId === 'dup_test_item').length;
+  assert(dupCount >= 1, '重复创建应至少保留一张');
+});
+
+test('复盘卡权限校验方法', () => {
+  const adminUser = Store.Users.getById('user_zhang');
+  const opUser = Store.Users.getById('user_li');
+  const observerUser = Store.Users.getById('user_zhao');
+  
+  assert(Store.ReviewCards.checkCanEditConclusion(adminUser) === true, '班长应有编辑权限');
+  assert(Store.ReviewCards.checkCanEditConclusion(opUser) === false, '值班员不应有编辑权限');
+  assert(Store.ReviewCards.checkCanEditConclusion(observerUser) === false, '观察员不应有编辑权限');
+  assert(Store.ReviewCards.checkCanEditConclusion(null) === false, '空用户不应有编辑权限');
+});
+
+test('复盘卡导出包含在完整数据包中', () => {
+  const data = Store.exportAllData();
+  assert(data.reviewCards && Array.isArray(data.reviewCards), '导出应包含复盘卡数据');
+});
+
+test('复盘卡导出恢复后持久化', () => {
+  Store.ReviewCards.saveAll([]);
+  Store.RecoveryLogs.saveAll([]);
+  
+  const adminUser = Store.Users.getById('user_zhang');
+  
+  const card = Store.ReviewCards.create({
+    sourceType: 'closed_item',
+    sourceId: 'persist_test_item',
+    sourceSummary: '持久化测试事项',
+    hasRisk: true,
+    riskDescription: '测试风险',
+    responsiblePersonId: 'user_li',
+    responsiblePersonName: '李四',
+    followUpDeadline: '2026-08-01',
+    conclusion: '持久化测试结论'
+  }, adminUser);
+  
+  Store.ReviewCards.addFollowUpNote(card.id, '持久化跟进说明', Store.Users.getById('user_li'));
+  Store.ReviewCards.updateConclusion(card.id, { conclusion: '更新后的结论' }, adminUser);
+  
+  const updatedCard = Store.ReviewCards.getById(card.id);
+  assert(updatedCard !== null, '更新后的复盘卡应存在');
+  assert(updatedCard.conclusion === '更新后的结论', '结论应为更新后的');
+  assert(updatedCard.followUpNotes.length === 1, '跟进说明应有一条');
+  assert(updatedCard.logs.length === 3, '应有3条操作日志');
+  
+  const exportedData = Store.exportAllData();
+  assert(exportedData.reviewCards.length >= 1, '导出应包含复盘卡');
+  
+  const exportedCard = exportedData.reviewCards.find(c => c.id === card.id);
+  assert(exportedCard !== undefined, '导出应包含测试复盘卡');
+  assert(exportedCard.conclusion === '更新后的结论', '导出结论应正确');
+  assert(exportedCard.hasRisk === true, '导出遗留风险应正确');
+  assert(exportedCard.responsiblePersonName === '李四', '导出责任人应正确');
+  assert(exportedCard.followUpDeadline === '2026-08-01', '导出截止时间应正确');
+  assert(exportedCard.followUpNotes.length === 1, '导出跟进说明应正确');
+  assert(exportedCard.logs.length === 3, '导出操作日志应正确');
+  
+  Store.ReviewCards.saveAll([]);
+  assert(Store.ReviewCards.getAll().length === 0, '清空后复盘卡应为空');
+  
+  const result = Store.executeImport(exportedData, adminUser);
+  assert(result.success === true, '恢复应成功');
+  
+  const restoredCard = Store.ReviewCards.getById(card.id);
+  assert(restoredCard !== null, '恢复后复盘卡应存在');
+  assert(restoredCard.conclusion === '更新后的结论', '恢复后结论应正确');
+  assert(restoredCard.hasRisk === true, '恢复后遗留风险应正确');
+  assert(restoredCard.responsiblePersonName === '李四', '恢复后责任人应正确');
+  assert(restoredCard.followUpDeadline === '2026-08-01', '恢复后截止时间应正确');
+  assert(restoredCard.followUpNotes.length === 1, '恢复后跟进说明应正确');
+  assert(restoredCard.followUpNotes[0].content === '持久化跟进说明', '恢复后跟进说明内容应正确');
+  assert(restoredCard.logs.length === 3, '恢复后操作日志应正确');
+  assert(restoredCard.logs[0].action === '创建复盘卡', '恢复后日志顺序应正确，最早为创建');
+  assert(restoredCard.logs[1].action === '添加跟进说明', '恢复后日志顺序应正确');
+  assert(restoredCard.logs[2].action === '修改复盘结论', '恢复后日志顺序应正确，最新为修改');
+});
+
+test('复盘卡校验 - reviewCards 字段应在导入校验中', () => {
+  const data = Store.exportAllData();
+  const validation = Store.validateImportStructure(data);
+  assert(validation.valid === true, '包含 reviewCards 的导出数据应通过校验');
+  
+  const invalidData = { ...data, reviewCards: 'not_an_array' };
+  const invalidValidation = Store.validateImportStructure(invalidData);
+  assert(invalidValidation.valid === false, 'reviewCards 非数组应校验失败');
+});
+
 console.log('\n=== 测试结果总结 ===');
 console.log(`通过: ${passed}`);
 console.log(`失败: ${failed}`);

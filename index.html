@@ -27,6 +27,7 @@
         </select>
         <button @click="activeTab = 'config'" class="btn btn-outline">⚙️ 配置</button>
         <button @click="activeTab = 'history'" class="btn btn-outline">📜 历史记录</button>
+        <button @click="activeTab = 'review'" class="btn btn-outline">🔍 交接复盘</button>
         <button @click="activeTab = 'backup'" class="btn btn-outline">💾 备份恢复</button>
         <button @click="exportHandover" class="btn btn-primary">📤 导出交接单</button>
       </div>
@@ -163,6 +164,12 @@
                 <div class="item-footer">
                   <span class="item-version">v{{ item.version }}</span>
                   <span class="item-time">{{ formatTime(item.closeTime) }}</span>
+                </div>
+                <div v-if="getReviewBySourceId(item.id)" class="item-review-badge" @click.stop="openReviewDetail(getReviewBySourceId(item.id))">
+                  🔍 已复盘
+                </div>
+                <div v-else class="item-review-action" @click.stop="openCreateReviewFromItem(item)" v-show="canCreateReview">
+                  + 创建复盘
                 </div>
               </div>
             </div>
@@ -344,6 +351,40 @@
             <div class="record-actions">
               <button @click="viewHandoverRecord(record)" class="btn btn-outline btn-sm">查看详情</button>
               <button @click="exportSingleHandover(record)" class="btn btn-primary btn-sm">导出</button>
+              <button v-if="getReviewBySourceId(record.id)" @click="openReviewDetail(getReviewBySourceId(record.id))" class="btn btn-info btn-sm">🔍 查看复盘</button>
+              <button v-else-if="canCreateReview" @click="openCreateReviewFromRecord(record)" class="btn btn-warning btn-sm">🔍 创建复盘</button>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- 复盘中心 -->
+      <div v-if="activeTab === 'review'" class="review-view">
+        <div class="review-header">
+          <h2>🔍 交接复盘中心</h2>
+          <div class="review-count">共 {{ reviewCards.length }} 张复盘卡</div>
+        </div>
+        <div v-if="reviewCards.length === 0" class="empty-state">
+          暂无复盘卡。可在已关闭事项或历史交接记录中创建复盘卡。
+        </div>
+        <div v-else class="review-list">
+          <div v-for="card in reviewCards" :key="card.id" class="review-card-item" @click="openReviewDetail(card)">
+            <div class="review-card-header">
+              <span class="review-card-source">{{ card.sourceType === 'handover_record' ? '交接记录' : '已关闭事项' }}</span>
+              <span class="review-card-risk" :class="card.hasRisk ? 'risk-yes' : 'risk-no'">{{ card.hasRisk ? '⚠️ 有遗留风险' : '✅ 无遗留风险' }}</span>
+            </div>
+            <div class="review-card-summary">{{ card.sourceSummary }}</div>
+            <div class="review-card-meta">
+              <span v-if="card.responsiblePersonName">责任人：{{ card.responsiblePersonName }}</span>
+              <span v-if="card.followUpDeadline">截止时间：{{ card.followUpDeadline }}</span>
+              <span>创建人：{{ card.creatorName }}</span>
+              <span>{{ formatTime(card.createTime) }}</span>
+            </div>
+            <div v-if="card.conclusion" class="review-card-conclusion">
+              <strong>复盘结论：</strong>{{ card.conclusion }}
+            </div>
+            <div class="review-card-followup-count">
+              跟进说明 {{ card.followUpNotes.length }} 条
             </div>
           </div>
         </div>
@@ -396,6 +437,10 @@
                 <div class="summary-item">
                   <span class="summary-label">恢复日志：</span>
                   <span class="summary-value">{{ currentSummary.recoveryLogs }}</span>
+                </div>
+                <div class="summary-item">
+                  <span class="summary-label">复盘卡：</span>
+                  <span class="summary-value">{{ currentSummary.reviewCards }}</span>
                 </div>
               </div>
               <button @click="exportAllData" class="btn btn-primary btn-large">📥 导出完整数据包</button>
@@ -784,6 +829,184 @@
         </div>
         <div class="modal-footer">
           <button @click="resolveConflict" class="btn btn-primary">知道了</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- 创建复盘卡弹窗 -->
+    <div v-if="showReviewModal" class="modal-overlay" @click.self="showReviewModal = false">
+      <div class="modal modal-large">
+        <div class="modal-header">
+          <h3>🔍 创建复盘卡</h3>
+          <button @click="showReviewModal = false" class="modal-close">×</button>
+        </div>
+        <div class="modal-body">
+          <div class="detail-section">
+            <h4>原始摘要</h4>
+            <p class="detail-desc">{{ reviewForm.sourceSummary }}</p>
+          </div>
+          <div class="form-group">
+            <label>是否遗留风险</label>
+            <label class="checkbox-label">
+              <input type="checkbox" v-model="reviewForm.hasRisk"> 标记为有遗留风险
+            </label>
+          </div>
+          <div v-if="reviewForm.hasRisk" class="form-group">
+            <label>风险描述</label>
+            <textarea v-model="reviewForm.riskDescription" class="input-textarea" rows="2" placeholder="描述遗留风险详情"></textarea>
+          </div>
+          <div class="form-group">
+            <label>责任人</label>
+            <select v-model="reviewForm.responsiblePersonId" class="input-select">
+              <option value="">未指定</option>
+              <option v-for="user in users" :key="user.id" :value="user.id">{{ user.name }}</option>
+            </select>
+          </div>
+          <div class="form-group">
+            <label>跟进截止时间</label>
+            <input type="date" v-model="reviewForm.followUpDeadline" class="input-text">
+          </div>
+          <div class="form-group">
+            <label>复盘结论</label>
+            <textarea v-model="reviewForm.conclusion" class="input-textarea" rows="3" placeholder="填写复盘结论"></textarea>
+          </div>
+        </div>
+        <div class="modal-footer">
+          <button @click="showReviewModal = false" class="btn btn-outline">取消</button>
+          <button @click="saveReviewCard" class="btn btn-primary">创建复盘卡</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- 复盘卡详情弹窗 -->
+    <div v-if="showReviewDetailModal" class="modal-overlay" @click.self="showReviewDetailModal = false">
+      <div class="modal modal-large">
+        <div class="modal-header">
+          <h3>🔍 复盘卡详情</h3>
+          <button @click="showReviewDetailModal = false" class="modal-close">×</button>
+        </div>
+        <div class="modal-body" v-if="selectedReviewCard">
+          <div class="detail-section">
+            <h4>原始摘要</h4>
+            <p class="detail-desc">{{ selectedReviewCard.sourceSummary }}</p>
+          </div>
+
+          <!-- 查看/编辑模式 -->
+          <div v-if="!isEditingReview">
+            <div class="detail-section">
+              <div class="detail-row">
+                <span class="detail-label">遗留风险：</span>
+                <span :class="selectedReviewCard.hasRisk ? 'text-danger' : 'text-success'">{{ selectedReviewCard.hasRisk ? '⚠️ 是' : '✅ 否' }}</span>
+              </div>
+              <div v-if="selectedReviewCard.hasRisk" class="detail-row">
+                <span class="detail-label">风险描述：</span>
+                <span>{{ selectedReviewCard.riskDescription || '无' }}</span>
+              </div>
+              <div class="detail-row">
+                <span class="detail-label">责任人：</span>
+                <span>{{ selectedReviewCard.responsiblePersonName || '未指定' }}</span>
+              </div>
+              <div class="detail-row">
+                <span class="detail-label">截止时间：</span>
+                <span>{{ selectedReviewCard.followUpDeadline || '未设置' }}</span>
+              </div>
+              <div class="detail-row">
+                <span class="detail-label">复盘结论：</span>
+                <span>{{ selectedReviewCard.conclusion || '暂无' }}</span>
+              </div>
+              <div class="detail-row">
+                <span class="detail-label">创建人：</span>
+                <span>{{ selectedReviewCard.creatorName }}</span>
+              </div>
+              <div class="detail-row">
+                <span class="detail-label">创建时间：</span>
+                <span>{{ formatTime(selectedReviewCard.createTime) }}</span>
+              </div>
+              <div class="detail-row">
+                <span class="detail-label">更新时间：</span>
+                <span>{{ formatTime(selectedReviewCard.updateTime) }}</span>
+              </div>
+            </div>
+          </div>
+
+          <!-- 编辑模式 -->
+          <div v-else>
+            <div class="detail-section">
+              <div class="form-group">
+                <label>是否遗留风险</label>
+                <label class="checkbox-label">
+                  <input type="checkbox" v-model="reviewEditForm.hasRisk"> 标记为有遗留风险
+                </label>
+              </div>
+              <div v-if="reviewEditForm.hasRisk" class="form-group">
+                <label>风险描述</label>
+                <textarea v-model="reviewEditForm.riskDescription" class="input-textarea" rows="2" placeholder="描述遗留风险详情"></textarea>
+              </div>
+              <div class="form-group">
+                <label>责任人</label>
+                <select v-model="reviewEditForm.responsiblePersonId" class="input-select">
+                  <option value="">未指定</option>
+                  <option v-for="user in users" :key="user.id" :value="user.id">{{ user.name }}</option>
+                </select>
+              </div>
+              <div class="form-group">
+                <label>跟进截止时间</label>
+                <input type="date" v-model="reviewEditForm.followUpDeadline" class="input-text">
+              </div>
+              <div class="form-group">
+                <label>复盘结论</label>
+                <textarea v-model="reviewEditForm.conclusion" class="input-textarea" rows="3" placeholder="填写复盘结论"></textarea>
+              </div>
+            </div>
+          </div>
+
+          <!-- 跟进说明 -->
+          <div class="detail-section">
+            <h4>跟进说明（{{ selectedReviewCard.followUpNotes.length }}条）</h4>
+            <div v-if="selectedReviewCard.followUpNotes.length === 0" class="empty-state small">
+              暂无跟进说明
+            </div>
+            <div v-else class="followup-list">
+              <div v-for="note in selectedReviewCard.followUpNotes" :key="note.id" class="followup-item">
+                <div class="followup-header">
+                  <span class="followup-author">{{ note.operatorName }}</span>
+                  <span class="followup-time">{{ formatTime(note.time) }}</span>
+                </div>
+                <div class="followup-content">{{ note.content }}</div>
+              </div>
+            </div>
+            <div class="form-group" style="margin-top: 12px;">
+              <textarea v-model="reviewFollowUpNote" class="input-textarea" rows="2" placeholder="添加跟进说明（所有值班员可添加）"></textarea>
+              <button @click="addReviewFollowUp" class="btn btn-primary btn-sm" style="margin-top: 8px;">添加跟进说明</button>
+            </div>
+          </div>
+
+          <!-- 操作日志 -->
+          <div class="detail-section">
+            <h4>操作日志</h4>
+            <div class="history-timeline">
+              <div v-for="(log, index) in selectedReviewCard.logs" :key="index" class="timeline-item">
+                <div class="timeline-dot"></div>
+                <div class="timeline-content">
+                  <div class="timeline-header">
+                    <span class="timeline-action">{{ log.action }}</span>
+                  </div>
+                  <div class="timeline-meta">
+                    <span>{{ log.operatorName }}</span>
+                    <span>{{ formatTime(log.time) }}</span>
+                  </div>
+                  <div v-if="log.detail" class="timeline-content-detail">{{ log.detail }}</div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+        <div class="modal-footer">
+          <button v-if="canEditReviewConclusion && !isEditingReview" @click="isEditingReview = true" class="btn btn-primary">✏️ 编辑复盘</button>
+          <button v-if="isEditingReview" @click="saveReviewConclusion" class="btn btn-success">保存修改</button>
+          <button v-if="isEditingReview" @click="isEditingReview = false" class="btn btn-outline">取消编辑</button>
+          <button v-if="canEditReviewConclusion" @click="deleteReviewCard" class="btn btn-danger">🗑️ 删除复盘卡</button>
+          <button @click="showReviewDetailModal = false" class="btn btn-outline">关闭</button>
         </div>
       </div>
     </div>
