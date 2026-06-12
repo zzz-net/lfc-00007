@@ -346,6 +346,36 @@ test('配置管理权限验证', () => {
   assert(observerRole.canManageConfig === false, '观察员角色不应有配置管理权限');
 });
 
+test('角色数据迁移 - 旧数据缺少 canManageConfig 字段时自动补齐', () => {
+  const originalRoles = Store.Roles.getAll();
+  
+  const legacyRoles = originalRoles.map(r => {
+    const { canManageConfig, ...rest } = r;
+    return rest;
+  });
+  assert(legacyRoles.every(r => !('canManageConfig' in r)), '模拟旧数据应没有 canManageConfig 字段');
+  
+  Store.Roles.saveAll(legacyRoles);
+  
+  const migratedRoles = Store.Roles.getAll();
+  assert(migratedRoles.every(r => 'canManageConfig' in r), '迁移后所有角色都应有 canManageConfig 字段');
+  
+  const adminRole = migratedRoles.find(r => r.id === 'role_admin');
+  assert(adminRole.canManageConfig === true, '班长角色迁移后 canManageConfig 应为 true');
+  
+  const opRole = migratedRoles.find(r => r.id === 'role_operator');
+  assert(opRole.canManageConfig === false, '运维值班员角色迁移后 canManageConfig 应为 false');
+  
+  const observerRole = migratedRoles.find(r => r.id === 'role_observer');
+  assert(observerRole.canManageConfig === false, '观察员角色迁移后 canManageConfig 应为 false');
+  
+  const adminUser = Store.Users.getById('user_zhang');
+  const permCheck = Store.checkUserPermission(adminUser);
+  assert(permCheck.allowed === true, '迁移后班长应能通过权限校验');
+  
+  Store.Roles.saveAll(originalRoles);
+});
+
 test('成功导出完整数据包', () => {
   const data = Store.exportAllData();
   

@@ -52,7 +52,22 @@ const Store = (function() {
 
   const Roles = {
     getAll() {
-      return getFromStorage(STORAGE_KEYS.ROLES, []);
+      const roles = getFromStorage(STORAGE_KEYS.ROLES, []);
+      let needsSave = false;
+      const migrated = roles.map(role => {
+        if (!('canManageConfig' in role)) {
+          needsSave = true;
+          return {
+            ...role,
+            canManageConfig: role.id === 'role_admin' || role.name === '班长'
+          };
+        }
+        return role;
+      });
+      if (needsSave) {
+        saveToStorage(STORAGE_KEYS.ROLES, migrated);
+      }
+      return migrated;
     },
     saveAll(roles) {
       return saveToStorage(STORAGE_KEYS.ROLES, roles);
