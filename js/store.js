@@ -261,6 +261,422 @@ const Store = (function() {
     },
     close(id, operator, reason, baseVersion) {
       return this.changeStatus(id, 'closed', operator, reason, baseVersion);
+    },
+
+    exportExceptionHandover(operator, selectedItemIds, checkResults, takeoverCandidateIds) {
+      const EXCEPTION_HANDOVER_VERSION = '1.0';
+      const shift = CurrentShift.get();
+      const shiftInfo = shift.shiftId ? {
+        shiftId: shift.shiftId,
+        shiftName: Shifts.getById(shift.shiftId)?.name || '',
+        date: shift.date
+      } : null;
+
+      const handoverUser = shift.handoverUserId ? {
+        id: shift.handoverUserId,
+        name: Users.getById(shift.handoverUserId)?.name || '',
+        roleId: Users.getById(shift.handoverUserId)?.roleId || '',
+        roleName: (() => {
+          const u = Users.getById(shift.handoverUserId);
+          return u ? (Roles.getById(u.roleId)?.name || '') : '';
+        })()
+      } : (operator ? {
+        id: operator.id, name: operator.name, roleId: operator.roleId,
+        roleName: Roles.getById(operator.roleId)?.name || ''
+      } : null);
+
+      const allItems = this.getAll();
+      const items = selectedItemIds && selectedItemIds.length > 0
+        ? allItems.filter(it => selectedItemIds.includes(it.id))
+        : allItems.filter(it => it.shiftId === shift.shiftId && it.shiftDate === shift.date);
+
+      const allCheckItems = CheckItems.getAll();
+      const checkResultList = allCheckItems.map(ci => ({
+        id: ci.id,
+        name: ci.name,
+        required: ci.required || false,
+        checked: !!(checkResults && checkResults[ci.id] && checkResults[ci.id].checked)
+      }));
+
+      const candidates = (takeoverCandidateIds || []).map(uid => {
+        const u = Users.getById(uid);
+        if (!u) return null;
+        return {
+          id: u.id,
+          name: u.name,
+          roleId: u.roleId,
+          roleName: Roles.getById(u.roleId)?.name || ''
+        };
+      }).filter(Boolean);
+
+      return {
+        packageType: 'exception_handover',
+        packageVersion: EXCEPTION_HANDOVER_VERSION,
+        exportTime: new Date().toISOString(),
+        shiftInfo,
+        handoverUser,
+        operator: operator ? {
+          id: operator.id, name: operator.name, roleId: operator.roleId,
+          roleName: Roles.getById(operator.roleId)?.name || ''
+        } : null,
+        takeoverCandidates: candidates,
+        checkResults: checkResultList,
+        items: items.map(it => JSON.parse(JSON.stringify(it)))
+      };
+    },
+
+    validateExceptionHandoverStructure(data) {
+      const errors = [];
+      const warnings = [];
+
+      if (!data || typeof data !== 'object') {
+        errors.push('交接包数据格式错误，应为 JSON 对象');
+        return { valid: false, errors, warnings };
+      }
+
+      if (!data.packageType) {
+        errors.push('缺少 packageType 字段');
+      } else if (data.packageType !== 'exception_handover') {
+        errors.push(`packageType 应为 'exception_handover'，实际为 '${data.packageType}'`);
+      }
+
+      if (!data.packageVersion) {
+        warnings.push('缺少 packageVersion 字段');
+      }
+
+      if (!data.exportTime) {
+        warnings.push('缺少 exportTime 字段');
+      }
+
+      if (!data.shiftInfo) {
+        errors.push('缺少 shiftInfo（班次信息）');
+      } else if (typeof data.shiftInfo !== 'object') {
+        errors.push('shiftInfo 格式错误');
+      } else {
+        if (!data.shiftInfo.shiftId) warnings.push('shiftInfo 缺少 shiftId');
+        if (!data.shiftInfo.date) warnings.push('shiftInfo 缺少 date');
+      }
+
+      if (!data.handoverUser) {
+        errors.push('缺少 handoverUser（交班人信息）');
+      } else if (typeof data.handoverUser !== 'object') {
+        errors.push('handoverUser 格式错误');
+      }
+
+      if (!Array.isArray(data.items)) {
+        errors.push('items 应为数组');
+      } else {
+        data.items.forEach((it, idx) => {
+          if (!it || typeof it !== 'object') {
+            errors.push(`第 ${idx + 1} 个事项格式错误`);
+            return;
+          }
+          if (!it.id) errors.push(`第 ${idx + 1} 个事项缺少 id`);
+          if (!it.title) warnings.push(`事项 ${it.id || idx + 1} 缺少 title`);
+          if (typeof it.version !== 'number') warnings.push(`事项 ${it.id || idx + 1} 缺少数字类型的 version`);
+          if (!Array.isArray(it.history)) warnings.push(`事项 ${it.id || idx + 1} 缺少 history 数组`);
+        });
+      }
+
+      if (!Array.isArray(data.takeoverCandidates)) {
+        warnings.push('takeoverCandidates 应为数组');
+      }
+      if (!Array.isArray(data.checkResults)) {
+        warnings.push('checkResults 应为数组');
+      }
+
+      return { valid: errors.length === 0, errors, warnings };
+    },
+
+    checkExceptionHandoverPermission(user, pkgData) {
+      if (!user) {
+        return { allowed: false, reason: '未登录用户无权限导入交接包' };
+      }
+      const role = Roles.getById(user.roleId);
+      if (!role || !role.canConfirm) {
+        return { allowed: false, reason: `当前用户角色无接班确认权限（需要 canConfirm）` };
+      }
+      const candidates = pkgData.takeoverCandidates || [];
+      if (candidates.length > 0) {
+        const inList = candidates.some(c => c.id === user.id);
+        if (!inList) {
+          return {
+            allowed: false,
+            reason: `当前用户不在接班候选人列表中（候选人：${candidates.map(c => c.name).join('、')}）`
+          };
+        }
+      }
+      return { allowed: true, reason: '权限校验通过' };
+    },
+
+    previewExceptionHandoverImport(data, currentUser) {
+      const structureValidation = this.validateExceptionHandoverStructure(data);
+
+      const currentVersion = (typeof CURRENT_DATA_VERSION !== 'undefined') ? CURRENT_DATA_VERSION : '3.0';
+      const importVersion = data.packageVersion || '0.0';
+      const compatibleVersions = (typeof COMPATIBLE_VERSIONS !== 'undefined') ? COMPATIBLE_VERSIONS : ['1.0', '2.0', '3.0'];
+      const isCompatible = compatibleVersions.includes(importVersion) || importVersion === currentVersion;
+      const isOlder = importVersion < currentVersion;
+      const versionCheck = {
+        compatible: isCompatible,
+        importVersion,
+        currentVersion,
+        isOlder,
+        message: isCompatible
+          ? (isOlder ? '导入版本较旧，可兼容导入' : '版本兼容')
+          : `导入版本 ${importVersion} 与当前版本 ${currentVersion} 不兼容`
+      };
+
+      const permissionCheck = this.checkExceptionHandoverPermission(currentUser, data);
+
+      const localItemsMap = {};
+      this.getAll().forEach(it => { localItemsMap[it.id] = it; });
+
+      const itemAnalysis = [];
+      const importItems = data.items || [];
+
+      importItems.forEach(imported => {
+        const local = localItemsMap[imported.id];
+        let action;
+        let canImport;
+        let reason = '';
+
+        if (!local) {
+          action = 'new';
+          canImport = true;
+          reason = '本地不存在该事项，将新增';
+        } else {
+          const localVersion = local.version || 0;
+          const importVersion = imported.version || 0;
+          const localUpdateTime = new Date(local.updateTime || 0).getTime();
+          const importUpdateTime = new Date(imported.updateTime || 0).getTime();
+
+          const isContentEqual = JSON.stringify({
+            t: imported.title, d: imported.description, s: imported.status,
+            a: imported.assigneeId
+          }) === JSON.stringify({
+            t: local.title, d: local.description, s: local.status,
+            a: local.assigneeId
+          });
+
+          if (localVersion > importVersion) {
+            action = 'conflict';
+            canImport = false;
+            reason = `本地版本(v${localVersion})比导入版本(v${importVersion})更新，可能已有新处理，已跳过`;
+          } else if (localUpdateTime > importUpdateTime) {
+            action = 'conflict';
+            canImport = false;
+            reason = `本地更新时间比导入包中更新时间更晚，可能已有新处理，已跳过`;
+          } else if (isContentEqual && localVersion === importVersion) {
+            action = 'skip';
+            canImport = false;
+            reason = '本地内容与导入内容完全一致，无需更新';
+          } else {
+            action = 'overwrite';
+            canImport = true;
+            reason = `本地有该事项，内容有差异，将覆盖更新（版本号会递增）`;
+          }
+        }
+
+        itemAnalysis.push({
+          id: imported.id,
+          title: imported.title || imported.id,
+          action,
+          canImport: permissionCheck.allowed && canImport,
+          reason,
+          importedVersion: imported.version,
+          localVersion: local?.version,
+          importedItem: imported,
+          localItem: local
+        });
+      });
+
+      const summary = {
+        total: itemAnalysis.length,
+        newCount: itemAnalysis.filter(a => a.action === 'new').length,
+        overwriteCount: itemAnalysis.filter(a => a.action === 'overwrite').length,
+        conflictCount: itemAnalysis.filter(a => a.action === 'conflict').length,
+        skipCount: itemAnalysis.filter(a => a.action === 'skip').length
+      };
+
+      const allCheckItems = CheckItems.getAll();
+      const packageCheckMap = {};
+      (data.checkResults || []).forEach(cr => { packageCheckMap[cr.id] = cr; });
+      const checkItemResults = allCheckItems.map(ci => {
+        const pkgCr = packageCheckMap[ci.id];
+        return {
+          id: ci.id,
+          name: ci.name,
+          required: ci.required || false,
+          checked: pkgCr ? !!pkgCr.checked : false,
+          inPackage: !!pkgCr
+        };
+      });
+
+      return {
+        summary,
+        itemAnalysis,
+        checkItemResults,
+        packageInfo: {
+          packageType: data.packageType,
+          packageVersion: data.packageVersion,
+          exportTime: data.exportTime,
+          shiftInfo: data.shiftInfo,
+          handoverUser: data.handoverUser,
+          operator: data.operator,
+          takeoverCandidates: data.takeoverCandidates || []
+        },
+        structureValid: structureValidation.valid,
+        structureWarnings: structureValidation.warnings,
+        structureErrors: structureValidation.errors,
+        versionCheck,
+        permissionCheck
+      };
+    },
+
+    executeExceptionHandoverImport(data, currentUser) {
+      try {
+        const preview = this.previewExceptionHandoverImport(data, currentUser);
+        if (!preview.permissionCheck.allowed) {
+          return {
+            success: false,
+            errors: [preview.permissionCheck.reason],
+            imported: { newCount: 0, overwriteCount: 0, conflictCount: 0, skipCount: preview.summary.skipCount }
+          };
+        }
+
+        const beforeSnapshot = this.getAll();
+        const importedItemIds = [];
+        let newCount = 0;
+        let overwriteCount = 0;
+
+        const items = this.getAll();
+        const itemsMap = {};
+        items.forEach(it => { itemsMap[it.id] = it; });
+
+        preview.itemAnalysis.forEach(analysis => {
+          if (!analysis.canImport) return;
+          const imported = analysis.importedItem;
+
+          if (analysis.action === 'new') {
+            const now = new Date().toISOString();
+            const newItem = {
+              ...imported,
+              version: Math.max(1, imported.version || 1),
+              createTime: imported.createTime || now,
+              updateTime: now,
+              history: [
+                ...(imported.history || []),
+                {
+                  action: 'import_create',
+                  timestamp: now,
+                  operator: currentUser ? {
+                    id: currentUser.id, name: currentUser.name,
+                    roleId: currentUser.roleId,
+                    roleName: Roles.getById(currentUser.roleId)?.name || ''
+                  } : null,
+                  remark: '从异常交接包导入新增'
+                }
+              ]
+            };
+            items.push(newItem);
+            itemsMap[newItem.id] = newItem;
+            importedItemIds.push(newItem.id);
+            newCount++;
+          } else if (analysis.action === 'overwrite') {
+            const local = itemsMap[imported.id];
+            if (local) {
+              const now = new Date().toISOString();
+              const oldVersion = local.version || 0;
+              const importVersion = imported.version || 0;
+              local.title = imported.title;
+              local.description = imported.description;
+              local.type = imported.type;
+              local.status = imported.status;
+              local.assigneeId = imported.assigneeId;
+              local.shiftId = imported.shiftId || local.shiftId;
+              local.shiftDate = imported.shiftDate || local.shiftDate;
+              local.version = Math.max(oldVersion, importVersion) + 1;
+              local.updateTime = now;
+              if (!Array.isArray(local.history)) local.history = [];
+              local.history.push({
+                action: 'import_overwrite',
+                timestamp: now,
+                operator: currentUser ? {
+                  id: currentUser.id, name: currentUser.name,
+                  roleId: currentUser.roleId,
+                  roleName: Roles.getById(currentUser.roleId)?.name || ''
+                } : null,
+                remark: '异常交接包覆盖更新',
+                baseVersion: oldVersion
+              });
+              importedItemIds.push(local.id);
+              overwriteCount++;
+            }
+          }
+        });
+
+        this.saveAll(items);
+
+        const afterSnapshot = this.getAll();
+        const logId = 'recov_' + Date.now() + '_' + Math.random().toString(36).slice(2, 8);
+        RecoveryLogs.add({
+          id: logId,
+          operationType: 'exception_handover_import',
+          operationTime: new Date().toISOString(),
+          operator: currentUser ? {
+            id: currentUser.id, name: currentUser.name,
+            roleId: currentUser.roleId,
+            roleName: Roles.getById(currentUser.roleId)?.name || ''
+          } : null,
+          packageInfo: {
+            packageVersion: data.packageVersion,
+            shiftInfo: data.shiftInfo,
+            handoverUser: data.handoverUser,
+            exportTime: data.exportTime
+          },
+          beforeSnapshot: { items: beforeSnapshot },
+          afterSnapshot: { items: afterSnapshot },
+          conflicts: preview.itemAnalysis.filter(a => a.action === 'conflict').map(a => ({
+            type: 'item_version_or_update',
+            id: a.id,
+            name: a.title,
+            localVersion: a.localVersion,
+            importVersion: a.importedVersion,
+            reason: a.reason
+          })),
+          importedItemIds,
+          skippedCount: preview.summary.conflictCount + preview.summary.skipCount,
+          conflictCount: preview.summary.conflictCount,
+          success: true
+        });
+
+        return {
+          success: true,
+          imported: {
+            newCount,
+            overwriteCount,
+            conflictCount: preview.summary.conflictCount,
+            skipCount: preview.summary.skipCount,
+            total: preview.summary.total
+          },
+          logId
+        };
+      } catch (e) {
+        RecoveryLogs.add({
+          id: 'recov_' + Date.now() + '_' + Math.random().toString(36).slice(2, 8),
+          operationType: 'exception_handover_import',
+          operationTime: new Date().toISOString(),
+          operator: currentUser ? {
+            id: currentUser.id, name: currentUser.name,
+            roleId: currentUser.roleId,
+            roleName: Roles.getById(currentUser.roleId)?.name || ''
+          } : null,
+          success: false,
+          errorMessage: e.message
+        });
+        return { success: false, errors: ['导入过程发生错误: ' + e.message] };
+      }
     }
   };
 
@@ -1068,6 +1484,8 @@ const Store = (function() {
     }
   }
 
+  const EXCEPTION_HANDOVER_VERSION = '1.0';
+
   return {
     Shifts,
     Roles,
@@ -1095,6 +1513,7 @@ const Store = (function() {
     executeImport,
     CURRENT_DATA_VERSION,
     COMPATIBLE_VERSIONS,
-    generateId
+    generateId,
+    EXCEPTION_HANDOVER_VERSION
   };
 })();

@@ -1356,6 +1356,145 @@ createApp({
       });
     });
 
+    // ====== 异常交接包 ======
+    const showExportExceptionModal = ref(false);
+    const exceptionSelectedItemIds = ref([]);
+    const exceptionCheckResults = reactive({});
+    const exceptionCandidateIds = ref([]);
+
+    const exceptionImportFileInput = ref(null);
+    const exceptionSelectedFileName = ref('');
+    const exceptionSelectedFileContent = ref(null);
+    const showExceptionImportPreviewModal = ref(false);
+    const exceptionImportPreview = ref(null);
+    const exceptionImportError = ref('');
+
+    const currentShift = computed(() => {
+      return shifts.value.find(s => s.id === currentShiftId.value) || null;
+    });
+
+    const handoverUserName = computed(() => {
+      const u = users.value.find(x => x.id === handoverUserId.value);
+      return u ? u.name : '未设置';
+    });
+
+    const currentShiftItems = computed(() => {
+      return items.value.filter(it => it.shiftId === currentShiftId.value && it.shiftDate === currentShiftDate.value);
+    });
+
+    watch(showExportExceptionModal, (val) => {
+      if (val) {
+        exceptionSelectedItemIds.value = currentShiftItems.value.map(it => it.id);
+        checkItems.value.forEach(ci => {
+          if (!exceptionCheckResults[ci.id]) {
+            exceptionCheckResults[ci.id] = { checked: false };
+          }
+        });
+        exceptionCandidateIds.value = [];
+      }
+    });
+
+    function doExportExceptionHandover() {
+      if (!currentShiftId.value) {
+        showToast('请先设置当前班次', 'warning');
+        return;
+      }
+      const operator = users.value.find(u => u.id === currentUserId.value) || null;
+      const pkg = Store.Items.exportExceptionHandover(
+        operator,
+        exceptionSelectedItemIds.value,
+        exceptionCheckResults,
+        exceptionCandidateIds.value
+      );
+      const jsonStr = JSON.stringify(pkg, null, 2);
+      const blob = new Blob([jsonStr], { type: 'application/json' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      const dateStr = new Date().toISOString().slice(0, 10).replace(/-/g, '');
+      a.download = `exception-handover-${dateStr}-${currentShift.value?.name || 'shift'}.json`;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+      showExportExceptionModal.value = false;
+      showToast(`已导出异常交接包（${pkg.items.length}项）`, 'success');
+    }
+
+    function onExceptionFileSelected(e) {
+      const file = e.target.files[0];
+      if (!file) return;
+      exceptionSelectedFileName.value = file.name;
+      const reader = new FileReader();
+      reader.onload = (ev) => {
+        try {
+          exceptionSelectedFileContent.value = JSON.parse(ev.target.result);
+          exceptionImportError.value = '';
+        } catch (err) {
+          exceptionImportError.value = '文件解析失败：' + err.message;
+          exceptionSelectedFileContent.value = null;
+        }
+      };
+      reader.readAsText(file);
+    }
+
+    function clearExceptionFileSelection() {
+      exceptionSelectedFileName.value = '';
+      exceptionSelectedFileContent.value = null;
+      exceptionImportError.value = '';
+      if (exceptionImportFileInput.value) exceptionImportFileInput.value.value = '';
+    }
+
+    function previewExceptionHandoverImport() {
+      if (!exceptionSelectedFileContent.value) {
+        showToast('请先选择交接包文件', 'warning');
+        return;
+      }
+      const structureCheck = Store.Items.validateExceptionHandoverStructure(exceptionSelectedFileContent.value);
+      if (!structureCheck.valid) {
+        exceptionImportError.value = '包结构错误：\n' + structureCheck.errors.join('\n');
+        return;
+      }
+      const user = users.value.find(u => u.id === currentUserId.value) || null;
+      exceptionImportPreview.value = Store.Items.previewExceptionHandoverImport(
+        exceptionSelectedFileContent.value,
+        user
+      );
+      showExceptionImportPreviewModal.value = true;
+    }
+
+    function cancelExceptionImport() {
+      showExceptionImportPreviewModal.value = false;
+      exceptionImportPreview.value = null;
+    }
+
+    function confirmExceptionImport() {
+      if (!exceptionImportPreview.value?.permissionCheck?.allowed) {
+        showToast('无权限导入此交接包', 'error');
+        return;
+      }
+      const user = users.value.find(u => u.id === currentUserId.value) || null;
+      const result = Store.Items.executeExceptionHandoverImport(
+        exceptionSelectedFileContent.value,
+        user
+      );
+      showExceptionImportPreviewModal.value = false;
+      loadData();
+      showToast(`交接包导入完成：新增${result.imported.newCount}项，覆盖${result.imported.overwriteCount}项，冲突${result.imported.conflictCount}项，跳过${result.imported.skipCount}项`,
+        result.success ? 'success' : 'warning');
+      clearExceptionFileSelection();
+    }
+
+    function getExceptionActionName(action) {
+      const map = {
+        new: '新增',
+        overwrite: '覆盖',
+        conflict: '冲突',
+        skip: '跳过'
+      };
+      return map[action] || action;
+    }
+
     return {
       activeTab,
       configTab,
@@ -1408,6 +1547,17 @@ createApp({
       pendingConfirmItems,
       currentDataVersion,
       currentSummary,
+
+      showExportExceptionModal,
+      exceptionSelectedItemIds,
+      exceptionCheckResults,
+      exceptionCandidateIds,
+      currentShiftItems,
+      exceptionImportFileInput,
+      exceptionSelectedFileName,
+      showExceptionImportPreviewModal,
+      exceptionImportPreview,
+      exceptionImportError,
 
       itemsByStatus,
       canEditItem,
@@ -1482,7 +1632,15 @@ createApp({
       clearFileSelection,
       previewAndValidateImport,
       cancelImport,
-      confirmRestore
+      confirmRestore,
+
+      doExportExceptionHandover,
+      onExceptionFileSelected,
+      clearExceptionFileSelection,
+      previewExceptionHandoverImport,
+      cancelExceptionImport,
+      confirmExceptionImport,
+      getExceptionActionName
     };
   }
 }).mount('#app');

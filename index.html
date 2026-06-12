@@ -29,6 +29,7 @@
         <button @click="activeTab = 'history'" class="btn btn-outline">📜 历史记录</button>
         <button @click="activeTab = 'review'" class="btn btn-outline">🔍 交接复盘</button>
         <button @click="activeTab = 'backup'" class="btn btn-outline">💾 备份恢复</button>
+        <button @click="showExportExceptionModal = true" class="btn btn-outline">📦 异常交接包</button>
         <button @click="exportHandover" class="btn btn-primary">📤 导出交接单</button>
       </div>
     </header>
@@ -474,14 +475,14 @@
             </div>
           </div>
 
-          <!-- 导入区域 -->
+          <!-- 完整备份导入区域 -->
           <div class="backup-section">
             <div class="section-header">
-              <h3>📥 从本地导入恢复</h3>
+              <h3>📥 从本地导入恢复（完整数据包）</h3>
             </div>
             <div class="section-body">
               <p class="section-desc">
-                选择本地 JSON 文件进行数据恢复。导入前将进行结构校验、版本兼容检查和权限校验。
+                选择本地 JSON 文件进行完整数据恢复。导入前将进行结构校验、版本兼容检查和权限校验。
               </p>
               <div class="import-area">
                 <input type="file" ref="importFileInput" @change="onFileSelected" accept=".json" class="file-input" id="importFile">
@@ -496,6 +497,32 @@
               </div>
               <div v-if="importError" class="alert alert-error">
                 {{ importError }}
+              </div>
+            </div>
+          </div>
+
+          <!-- 异常交接包导入区域 -->
+          <div class="backup-section">
+            <div class="section-header">
+              <h3>📦 导入异常交接包</h3>
+            </div>
+            <div class="section-body">
+              <p class="section-desc">
+                导入交班同事打包的异常交接包。导入前将预览事项变更情况，识别新增、覆盖、冲突和跳过的事项。
+              </p>
+              <div class="import-area">
+                <input type="file" ref="exceptionImportFileInput" @change="onExceptionFileSelected" accept=".json" class="file-input" id="exceptionImportFile">
+                <label for="exceptionImportFile" class="file-label">
+                  <span v-if="!exceptionSelectedFileName">📁 点击选择异常交接包 JSON</span>
+                  <span v-else>📁 {{ exceptionSelectedFileName }}</span>
+                </label>
+                <div v-if="exceptionSelectedFileName" class="import-actions">
+                  <button @click="clearExceptionFileSelection" class="btn btn-outline btn-sm">清除</button>
+                  <button @click="previewExceptionHandoverImport" class="btn btn-success btn-large">🔍 预览交接内容</button>
+                </div>
+              </div>
+              <div v-if="exceptionImportError" class="alert alert-error">
+                {{ exceptionImportError }}
               </div>
             </div>
           </div>
@@ -1091,6 +1118,175 @@
           <button v-if="isEditingReview" @click="isEditingReview = false" class="btn btn-outline">取消编辑</button>
           <button v-if="canEditReviewConclusion" @click="deleteReviewCard" class="btn btn-danger">🗑️ 删除复盘卡</button>
           <button @click="showReviewDetailModal = false" class="btn btn-outline">关闭</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- 导出异常交接包弹窗 -->
+    <div v-if="showExportExceptionModal" class="modal-overlay" @click.self="showExportExceptionModal = false">
+      <div class="modal modal-large">
+        <div class="modal-header">
+          <h3>📦 导出异常交接包</h3>
+          <button @click="showExportExceptionModal = false" class="modal-close">×</button>
+        </div>
+        <div class="modal-body">
+          <div v-if="!currentShiftId" class="alert alert-warning">
+            请先在「配置 → 当前班次」中设置当前班次
+          </div>
+          <div v-else>
+            <div class="export-exception-info">
+              <div class="form-group">
+                <label>交班班次：</label>
+                <span><strong>{{ currentShift?.name }}</strong>（{{ currentShiftDate }}）</span>
+              </div>
+              <div class="form-group">
+                <label>交班人：</label>
+                <span><strong>{{ handoverUserName }}</strong></span>
+              </div>
+            </div>
+
+            <h4 style="margin: 16px 0 8px;">选择要交接的事项（默认全选当前班次事项）</h4>
+            <div class="exception-items-select">
+              <div v-if="currentShiftItems.length === 0" class="empty-state small">
+                当前班次暂无事项
+              </div>
+              <div v-for="item in currentShiftItems" :key="item.id" class="exception-item-row">
+                <label class="checkbox-label">
+                  <input type="checkbox" v-model="exceptionSelectedItemIds" :value="item.id">
+                  <span class="item-type" :class="'type-' + item.type">{{ getItemTypeName(item.type) }}</span>
+                  <span class="exception-item-title">{{ item.title }}</span>
+                  <span class="status-badge" :class="'status-' + item.status">{{ getStatusName(item.status) }}</span>
+                  <span class="text-muted" style="font-size:11px;">v{{ item.version }}</span>
+                </label>
+              </div>
+            </div>
+
+            <h4 style="margin: 16px 0 8px;">交接检查项</h4>
+            <div class="exception-checklist">
+              <div v-for="ci in checkItems" :key="ci.id" class="check-item-row">
+                <label class="checkbox-label">
+                  <input type="checkbox" v-model="exceptionCheckResults[ci.id].checked">
+                  <span class="check-name">{{ ci.name }}</span>
+                  <span v-if="ci.required" class="required-mark">*必填</span>
+                </label>
+                <span v-if="ci.description" class="check-desc">{{ ci.description }}</span>
+              </div>
+            </div>
+
+            <h4 style="margin: 16px 0 8px;">接班候选人（可多选，不选则所有有权限的用户都可以接）</h4>
+            <div class="exception-candidates">
+              <div v-for="user in users.filter(u => { const r = roles.find(x => x.id === u.roleId); return r && r.canConfirm; })" :key="user.id" class="candidate-row">
+                <label class="checkbox-label">
+                  <input type="checkbox" v-model="exceptionCandidateIds" :value="user.id">
+                  <span>{{ user.name }}</span>
+                  <span class="text-muted" style="font-size:11px;">（{{ getRoleName(user.roleId) }}）</span>
+                </label>
+              </div>
+            </div>
+          </div>
+        </div>
+        <div class="modal-footer">
+          <button @click="showExportExceptionModal = false" class="btn btn-outline">取消</button>
+          <button @click="doExportExceptionHandover" class="btn btn-primary" :disabled="!currentShiftId">
+            📦 导出交接包
+          </button>
+        </div>
+      </div>
+    </div>
+
+    <!-- 异常交接包导入预览弹窗 -->
+    <div v-if="showExceptionImportPreviewModal" class="modal-overlay" @click.self="showExceptionImportPreviewModal = false">
+      <div class="modal modal-xlarge">
+        <div class="modal-header">
+          <h3>🔍 异常交接包导入预览</h3>
+          <button @click="cancelExceptionImport" class="modal-close">×</button>
+        </div>
+        <div class="modal-body">
+          <div v-if="exceptionImportPreview" class="exception-import-preview">
+            <div class="preview-package-info">
+              <div class="info-row"><span class="info-label">交班班次：</span><span>{{ exceptionImportPreview.packageInfo.shiftInfo?.shiftName }}（{{ exceptionImportPreview.packageInfo.shiftInfo?.date }}）</span></div>
+              <div class="info-row"><span class="info-label">交班人：</span><span>{{ exceptionImportPreview.packageInfo.handoverUser?.name }}</span></div>
+              <div class="info-row" v-if="exceptionImportPreview.packageInfo.takeoverCandidates.length > 0">
+                <span class="info-label">接班候选人：</span>
+                <span>{{ exceptionImportPreview.packageInfo.takeoverCandidates.map(c => c.name).join('、') }}</span>
+              </div>
+              <div class="info-row"><span class="info-label">导出时间：</span><span>{{ formatIsoTime(exceptionImportPreview.packageInfo.exportTime) }}</span></div>
+              <div class="info-row"><span class="info-label">包版本：</span><span>v{{ exceptionImportPreview.packageInfo.packageVersion }}</span></div>
+            </div>
+
+            <div v-if="exceptionImportPreview.structureWarnings && exceptionImportPreview.structureWarnings.length > 0" class="alert alert-warning">
+              <strong>⚠️ 包结构警告：</strong>
+              <ul style="margin: 8px 0 0 20px;">
+                <li v-for="(w, idx) in exceptionImportPreview.structureWarnings" :key="idx">{{ w }}</li>
+              </ul>
+            </div>
+
+            <div class="version-alert" :class="{
+              'alert-success': exceptionImportPreview.versionCheck.compatible && !exceptionImportPreview.versionCheck.isOlder,
+              'alert-warning': exceptionImportPreview.versionCheck.compatible && exceptionImportPreview.versionCheck.isOlder,
+              'alert-error': !exceptionImportPreview.versionCheck.compatible
+            }">
+              <strong>版本检查：</strong>
+              {{ exceptionImportPreview.versionCheck.message }}
+              （导入版本：{{ exceptionImportPreview.versionCheck.importVersion }}，当前版本：{{ exceptionImportPreview.versionCheck.currentVersion }}）
+            </div>
+
+            <div class="permission-alert" :class="exceptionImportPreview.permissionCheck.allowed ? 'alert-success' : 'alert-error'">
+              <strong>权限检查：</strong>
+              {{ exceptionImportPreview.permissionCheck.reason }}
+            </div>
+
+            <h4 style="margin: 16px 0 8px;">📊 事项变更预览</h4>
+            <div class="preview-summary">
+              <div class="summary-tag tag-new">🆕 新增 {{ exceptionImportPreview.summary.newCount }}</div>
+              <div class="summary-tag tag-overwrite">🔄 覆盖 {{ exceptionImportPreview.summary.overwriteCount }}</div>
+              <div class="summary-tag tag-conflict">⚠️ 冲突 {{ exceptionImportPreview.summary.conflictCount }}</div>
+              <div class="summary-tag tag-skip">⏭️ 跳过 {{ exceptionImportPreview.summary.skipCount }}</div>
+              <div class="summary-tag tag-total">📋 共 {{ exceptionImportPreview.summary.total }} 项</div>
+            </div>
+
+            <div class="preview-items-table">
+              <div class="preview-row header">
+                <div>事项</div>
+                <div>导入状态</div>
+                <div>导入版本</div>
+                <div>本地版本</div>
+                <div>说明</div>
+              </div>
+              <div v-for="analysis in exceptionImportPreview.itemAnalysis" :key="analysis.id" class="preview-row" :class="'row-' + analysis.action">
+                <div>
+                  <span class="item-type" :class="'type-' + (analysis.importedItem?.type || 'other')">{{ getItemTypeName(analysis.importedItem?.type || 'other') }}</span>
+                  <span class="preview-item-title">{{ analysis.title }}</span>
+                </div>
+                <div>
+                  <span class="action-tag" :class="'action-' + analysis.action">
+                    {{ getExceptionActionName(analysis.action) }}
+                  </span>
+                </div>
+                <div>v{{ analysis.importedVersion ?? '-' }}</div>
+                <div>{{ analysis.localVersion ? 'v' + analysis.localVersion : '-' }}</div>
+                <div class="text-muted" style="font-size:12px;">{{ analysis.reason }}</div>
+              </div>
+            </div>
+
+            <div v-if="exceptionImportPreview.checkItemResults && exceptionImportPreview.checkItemResults.length > 0" style="margin-top: 16px;">
+              <h4 style="margin: 16px 0 8px;">✅ 检查项结果</h4>
+              <div class="preview-checklist">
+                <div v-for="cr in exceptionImportPreview.checkItemResults" :key="cr.id" class="preview-check-row">
+                  <span class="check-status">{{ cr.checked ? '✅' : '⬜' }}</span>
+                  <span>{{ cr.name }}</span>
+                  <span v-if="cr.required" class="required-mark">*必填</span>
+                  <span v-if="!cr.inPackage" class="text-muted" style="font-size:11px;">（包中未包含此项）</span>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+        <div class="modal-footer">
+          <button @click="cancelExceptionImport" class="btn btn-outline">取消</button>
+          <button @click="confirmExceptionImport" class="btn btn-success" :disabled="!exceptionImportPreview?.permissionCheck?.allowed">
+            ✅ 确认导入（{{ exceptionImportPreview ? (exceptionImportPreview.summary.newCount + exceptionImportPreview.summary.overwriteCount) : 0 }}项）
+          </button>
         </div>
       </div>
     </div>

@@ -2148,6 +2148,378 @@ test('getDiffLabel 不包含 reviewFilters（筛选不是计数类型）', () =>
   }
 });
 
+// ======== 异常交接包测试 ========
+test('导出异常交接包 - 字段完整性', () => {
+  Store.createSampleData();
+  const adminUser = Store.Users.getById('user_zhang');
+  const operator = adminUser;
+  const shift = Store.Shifts.getById('shift_morning');
+  Store.CurrentShift.save({ shiftId: shift.id, date: '2025-11-21', handoverUserId: '' });
+
+  const items = Store.Items.getAll();
+  const selectedItemIds = items.slice(0, 2).map(it => it.id);
+
+  const checkResults = {};
+  Store.CheckItems.getAll().forEach(ci => {
+    checkResults[ci.id] = { checked: ci.required };
+  });
+
+  const takeoverCandidateIds = ['user_li'];
+
+  const pkg = Store.Items.exportExceptionHandover(
+    operator,
+    selectedItemIds,
+    checkResults,
+    takeoverCandidateIds
+  );
+
+  assert(pkg.packageType === 'exception_handover', 'packageType 应为 exception_handover');
+  assert(pkg.packageVersion === '1.0', 'packageVersion 应为 1.0');
+  assert(pkg.exportTime && typeof pkg.exportTime === 'string', '应有 exportTime');
+  assert(pkg.shiftInfo && pkg.shiftInfo.shiftId === shift.id, '应包含正确的班次信息');
+  assert(pkg.shiftInfo.date === '2025-11-21', '应包含正确的日期');
+  assert(pkg.handoverUser && pkg.handoverUser.id === operator.id, '交班人应为当前操作员');
+  assert(pkg.takeoverCandidates.length === 1, '应有 1 位接班候选人');
+  assert(pkg.takeoverCandidates[0].id === 'user_li', '候选人应为 user_li');
+  assert(pkg.checkResults && pkg.checkResults.length > 0, '检查项结果不应为空');
+  assert(pkg.items.length === 2, `应导出 2 个事项，实际 ${pkg.items.length}`);
+  pkg.items.forEach(it => {
+    assert(typeof it.id === 'string' && it.id.length > 0, '事项应有 id');
+    assert(typeof it.title === 'string' && it.title.length > 0, '事项应有 title');
+    assert(typeof it.version === 'number', '事项应有 version');
+    assert(Array.isArray(it.history), '事项应有 history 数组');
+  });
+});
+
+test('校验异常交接包结构 - 字段缺失提示', () => {
+  const goodPkg = {
+    packageType: 'exception_handover',
+    packageVersion: '1.0',
+    exportTime: new Date().toISOString(),
+    shiftInfo: { shiftId: 's1', shiftName: '白班', date: '2025-11-21' },
+    handoverUser: { id: 'u1', name: '张三', roleId: 'r1', roleName: '班长' },
+    takeoverCandidates: [],
+    checkResults: [],
+    items: [{ id: 'it1', title: 'test', version: 1, history: [] }]
+  };
+
+  const r1 = Store.Items.validateExceptionHandoverStructure(goodPkg);
+  assert(r1.valid === true, '正常包应通过校验');
+
+  const noType = { ...goodPkg };
+  delete noType.packageType;
+  const r2 = Store.Items.validateExceptionHandoverStructure(noType);
+  assert(r2.valid === false, '缺少 packageType 应校验失败');
+  assert(r2.errors.some(e => e.includes('packageType')), '错误应提及 packageType');
+
+  const wrongType = { ...goodPkg, packageType: 'backup' };
+  const r3 = Store.Items.validateExceptionHandoverStructure(wrongType);
+  assert(r3.valid === false, '错误的 packageType 应校验失败');
+
+  const noItems = { ...goodPkg, items: 'not_array' };
+  const r4 = Store.Items.validateExceptionHandoverStructure(noItems);
+  assert(r4.valid === false, 'items 不是数组应校验失败');
+
+  const noShift = { ...goodPkg };
+  delete noShift.shiftInfo;
+  const r5 = Store.Items.validateExceptionHandoverStructure(noShift);
+  assert(r5.valid === false, '缺少 shiftInfo 应校验失败');
+
+  const noHandoverUser = { ...goodPkg };
+  delete noHandoverUser.handoverUser;
+  const r6 = Store.Items.validateExceptionHandoverStructure(noHandoverUser);
+  assert(r6.valid === false, '缺少 handoverUser 应校验失败');
+
+  const badItems = { ...goodPkg, items: [{ noId: true }] };
+  const r7 = Store.Items.validateExceptionHandoverStructure(badItems);
+  assert(r7.valid === false, '事项缺少 id 应校验失败');
+});
+
+test('导入预览 - 新增/覆盖/冲突/跳过 四类场景', () => {
+  Store.createSampleData();
+  const adminUser = Store.Users.getById('user_zhang');
+  const shift = Store.Shifts.getById('shift_morning');
+  Store.CurrentShift.save({ shiftId: shift.id, date: '2025-11-21', handoverUserId: '' });
+
+  const allItems = Store.Items.getAll();
+  const originalItem = allItems[0];
+  const overwriteItem = allItems[1];
+  const conflictItem = allItems[2];
+
+  // 先在本地更新 conflictItem，让版本号 +1，制造版本差异冲突
+  const oldConflictVersion = conflictItem.version;
+  Store.Items.update(conflictItem.id, { description: conflictItem.description + ' (本地更新)' }, adminUser, oldConflictVersion);
+  const updatedConflictItem = Store.Items.getById(conflictItem.id);
+  assert(updatedConflictItem.version > oldConflictVersion, '本地更新后版本号应递增');
+
+  // 构造导入包
+  const importItems = [
+    // 新增：本地不存在的事项
+    {
+      id: 'brand_new_item_001',
+      title: '全新事项',
+      type: 'alert',
+      status: 'new',
+      version: 1,
+      description: '描述',
+      shiftId: shift.id,
+      shiftDate: '2025-11-21',
+      updateTime: new Date().toISOString(),
+      history: [{ action: 'create', timestamp: new Date().toISOString() }]
+    },
+    // 覆盖：同 id 同版本 但内容不同
+    {
+      ...overwriteItem,
+      title: overwriteItem.title + ' (被修改)',
+      description: '覆盖更新的描述',
+      updateTime: overwriteItem.updateTime
+    },
+    // 冲突：本地版本比导入版本更新（导入旧版本 oldConflictVersion）
+    {
+      ...conflictItem,
+      version: oldConflictVersion,
+      title: '旧版本冲突项',
+      updateTime: conflictItem.updateTime
+    },
+    // 跳过：本地完全一致
+    JSON.parse(JSON.stringify(originalItem))
+  ];
+
+  const pkgData = {
+    packageType: 'exception_handover',
+    packageVersion: '1.0',
+    exportTime: new Date().toISOString(),
+    shiftInfo: { shiftId: shift.id, shiftName: shift.name, date: '2025-11-21' },
+    handoverUser: { id: adminUser.id, name: adminUser.name, roleId: adminUser.roleId, roleName: '班长' },
+    takeoverCandidates: [],
+    checkResults: [],
+    items: importItems
+  };
+
+  const preview = Store.Items.previewExceptionHandoverImport(pkgData, adminUser);
+
+  assert(preview.summary.total === 4, `总事项数应为 4，实际 ${preview.summary.total}`);
+  assert(preview.summary.newCount === 1, `新增应为 1，实际 ${preview.summary.newCount}`);
+  assert(preview.summary.overwriteCount >= 1, `覆盖应至少 1，实际 ${preview.summary.overwriteCount}`);
+  assert(preview.summary.conflictCount >= 1, `冲突应至少 1，实际 ${preview.summary.conflictCount}`);
+  assert(preview.summary.skipCount >= 1, `跳过应至少 1，实际 ${preview.summary.skipCount}`);
+
+  const newAnalysis = preview.itemAnalysis.find(a => a.id === 'brand_new_item_001');
+  assert(newAnalysis && newAnalysis.action === 'new', '新增项 action 应为 new');
+  assert(newAnalysis.canImport === true, '新增项应可以导入');
+
+  const overwriteAnalysis = preview.itemAnalysis.find(a => a.id === overwriteItem.id);
+  assert(overwriteAnalysis && overwriteAnalysis.action === 'overwrite', '覆盖项 action 应为 overwrite');
+  assert(overwriteAnalysis.canImport === true, '覆盖项应可以导入');
+
+  const conflictAnalysis = preview.itemAnalysis.find(a => a.id === conflictItem.id);
+  assert(conflictAnalysis && conflictAnalysis.action === 'conflict', '冲突项 action 应为 conflict');
+  assert(conflictAnalysis.canImport === false, '冲突项不应被导入');
+
+  const skipAnalysis = preview.itemAnalysis.find(a => a.id === originalItem.id);
+  assert(skipAnalysis && skipAnalysis.action === 'skip', '一致项 action 应为 skip');
+  assert(skipAnalysis.canImport === false, '跳过项不应被导入');
+});
+
+test('权限校验 - 角色权限 + 候选人列表双重拦截', () => {
+  Store.createSampleData();
+  const shift = Store.Shifts.getById('shift_morning');
+
+  // 观察员角色（无 canConfirm 权限）
+  const observerRole = Store.Roles.getAll().find(r => r.name === '观察员' || !r.canConfirm);
+  const observerUser = {
+    id: 'user_observer',
+    name: '观察员小王',
+    roleId: observerRole ? observerRole.id : 'role_observer',
+    roleName: '观察员'
+  };
+
+  // 有 canConfirm 权限的运维值班员
+  const dutyUser = Store.Users.getById('user_li');
+
+  const pkgData = {
+    packageType: 'exception_handover',
+    packageVersion: '1.0',
+    exportTime: new Date().toISOString(),
+    shiftInfo: { shiftId: shift.id, shiftName: shift.name, date: '2025-11-21' },
+    handoverUser: { id: 'user_zhang', name: '张三', roleId: 'role_monitor', roleName: '班长' },
+    takeoverCandidates: [{ id: 'user_zhang', name: '张三', roleId: 'role_monitor', roleName: '班长' }],
+    checkResults: [],
+    items: []
+  };
+
+  // 1. 观察员：角色本身无权限
+  const p1 = Store.Items.previewExceptionHandoverImport(pkgData, observerUser);
+  assert(p1.permissionCheck.allowed === false, '观察员不应允许导入');
+  assert(p1.permissionCheck.reason.includes('权限') || p1.permissionCheck.reason.includes('canConfirm'),
+    '拒绝理由应提及权限');
+
+  // 2. 运维值班员 user_li：有权限但不在候选人列表
+  const p2 = Store.Items.previewExceptionHandoverImport(pkgData, dutyUser);
+  assert(p2.permissionCheck.allowed === false, '不在候选人列表应被拒绝');
+  assert(p2.permissionCheck.reason.includes('候选人'), '拒绝理由应提及候选人');
+
+  // 3. 候选人在列表且有权限：应允许
+  const pkgData2 = {
+    ...pkgData,
+    takeoverCandidates: [{ id: dutyUser.id, name: dutyUser.name, roleId: dutyUser.roleId, roleName: '运维值班员' }]
+  };
+  const p3 = Store.Items.previewExceptionHandoverImport(pkgData2, dutyUser);
+  assert(p3.permissionCheck.allowed === true, '有权限且在候选人列表应允许');
+
+  // 4. 未指定候选人（空列表）：有权限的用户都可以接
+  const pkgData3 = { ...pkgData, takeoverCandidates: [] };
+  const p4 = Store.Items.previewExceptionHandoverImport(pkgData3, dutyUser);
+  assert(p4.permissionCheck.allowed === true, '未指定候选人时，有权限的用户都可以接');
+});
+
+test('执行导入 - 新增 + 覆盖 + 冲突跳过，写入恢复日志，刷新持久化', () => {
+  Store.createSampleData();
+  Store.RecoveryLogs.saveAll([]);
+
+  const adminUser = Store.Users.getById('user_zhang');
+  const shift = Store.Shifts.getById('shift_morning');
+  Store.CurrentShift.save({ shiftId: shift.id, date: '2025-11-21', handoverUserId: '' });
+
+  const originalCount = Store.Items.getAll().length;
+  const existingItem = Store.Items.getAll()[0];
+  const localVersion = existingItem.version;
+  const existingTitle = existingItem.title;
+
+  const importItems = [
+    {
+      id: 'imported_new_' + Date.now(),
+      title: '新导入事项',
+      type: 'alert',
+      status: 'new',
+      version: 1,
+      description: '新导入描述',
+      shiftId: shift.id,
+      shiftDate: '2025-11-21',
+      assigneeId: '',
+      history: [{ action: 'create', timestamp: new Date().toISOString(), operator: { id: 'x', name: 'x', roleId: 'x', roleName: 'x' } }]
+    },
+    {
+      ...existingItem,
+      title: '被覆盖更新的标题',
+      version: existingItem.version,
+      history: [
+        ...existingItem.history,
+        { action: 'update', timestamp: new Date().toISOString(), operator: { id: 'x', name: 'x', roleId: 'x', roleName: 'x' }, changes: [{ field: 'title', oldValue: existingTitle, newValue: '被覆盖更新的标题' }] }
+      ]
+    }
+  ];
+
+  const pkgData = {
+    packageType: 'exception_handover',
+    packageVersion: '1.0',
+    exportTime: new Date().toISOString(),
+    shiftInfo: { shiftId: shift.id, shiftName: shift.name, date: '2025-11-21' },
+    handoverUser: { id: adminUser.id, name: adminUser.name, roleId: adminUser.roleId, roleName: '班长' },
+    takeoverCandidates: [],
+    checkResults: [],
+    items: importItems
+  };
+
+  const result = Store.Items.executeExceptionHandoverImport(pkgData, adminUser);
+  assert(result.success === true, '导入应返回成功');
+  assert(result.imported.newCount === 1, '应新增 1 项');
+  assert(result.imported.overwriteCount === 1, '应覆盖 1 项');
+  assert(result.imported.conflictCount === 0, '应无冲突项');
+
+  const newCount = Store.Items.getAll().length;
+  assert(newCount === originalCount + 1, `总事项数应为 ${originalCount + 1}，实际 ${newCount}`);
+
+  // 验证覆盖后的版本号递增
+  const updatedItem = Store.Items.getById(existingItem.id);
+  assert(updatedItem.title === '被覆盖更新的标题', '覆盖项标题应已更新');
+  assert(updatedItem.version > localVersion, `覆盖后版本号应递增，原值 ${localVersion}，新值 ${updatedItem.version}`);
+
+  // 验证历史记录被追加
+  const hasImportHistory = updatedItem.history.some(h =>
+    h.action === 'import_overwrite' || h.remark?.includes('异常交接包')
+  );
+  assert(hasImportHistory === true, '覆盖事项应有导入历史记录');
+
+  // 验证恢复日志
+  const logs = Store.RecoveryLogs.getAll();
+  const importLog = logs.find(l => l.operationType === 'exception_handover_import');
+  assert(importLog, '应有异常交接包导入的恢复日志');
+  assert(importLog.operator.id === adminUser.id, '日志记录的操作员应为当前用户');
+  assert(importLog.importedItemIds && importLog.importedItemIds.length >= 2, '日志应记录导入的事项 id');
+
+  // 模拟刷新：验证 localStorage 持久化
+  const rawItems = JSON.parse(localStorage.getItem('handover_items') || '[]');
+  const persistedUpdated = rawItems.find(it => it.id === existingItem.id);
+  assert(persistedUpdated && persistedUpdated.title === '被覆盖更新的标题', '刷新后 localStorage 中应保留更新后的标题');
+  const persistedNew = rawItems.find(it => it.id === importItems[0].id);
+  assert(persistedNew, '刷新后 localStorage 中应保留新增事项');
+
+  // 重新读取验证
+  Store.Items.saveAll(rawItems);
+  const reloadedUpdated = Store.Items.getById(existingItem.id);
+  assert(reloadedUpdated.title === '被覆盖更新的标题', '重新加载后标题应正确');
+});
+
+test('冲突场景 - 同编号版本不同 / 本地有更新，导入被跳过', () => {
+  Store.createSampleData();
+  const adminUser = Store.Users.getById('user_zhang');
+  const shift = Store.Shifts.getById('shift_morning');
+
+  const existingItem = Store.Items.getAll()[0];
+  const originalTitle = existingItem.title;
+  const originalVersion = existingItem.version;
+
+  // 本地先做一次更新，版本号 +1
+  const updateResult = Store.Items.update(
+    existingItem.id,
+    { title: originalTitle + ' (本地最新修改)' },
+    adminUser,
+    originalVersion
+  );
+  assert(updateResult.success, '本地更新应成功');
+
+  const localItemAfter = Store.Items.getById(existingItem.id);
+  const localVersionAfter = localItemAfter.version;
+  assert(localVersionAfter > originalVersion, '本地版本号应递增');
+
+  // 构造导入包：版本号为 originalVersion（比本地旧）
+  const pkgData = {
+    packageType: 'exception_handover',
+    packageVersion: '1.0',
+    exportTime: new Date().toISOString(),
+    shiftInfo: { shiftId: shift.id, shiftName: shift.name, date: '2025-11-21' },
+    handoverUser: { id: adminUser.id, name: adminUser.name, roleId: adminUser.roleId, roleName: '班长' },
+    takeoverCandidates: [],
+    checkResults: [],
+    items: [
+      {
+        ...existingItem,
+        version: originalVersion,
+        title: '导入包中的旧版本标题'
+      }
+    ]
+  };
+
+  const preview = Store.Items.previewExceptionHandoverImport(pkgData, adminUser);
+  const analysis = preview.itemAnalysis.find(a => a.id === existingItem.id);
+  assert(analysis && analysis.action === 'conflict', `版本不一致应判定为冲突，实际 action=${analysis?.action}`);
+  assert(analysis.canImport === false, '冲突项应禁止导入');
+  assert(analysis.reason.includes('版本') || analysis.reason.includes('更新'),
+    '冲突理由应提及版本或更新');
+
+  // 执行导入
+  const result = Store.Items.executeExceptionHandoverImport(pkgData, adminUser);
+  assert(result.imported.conflictCount >= 1, '应至少有 1 项冲突');
+  assert(result.imported.overwriteCount === 0, '不应有覆盖项');
+
+  // 本地数据不应被修改
+  const finalItem = Store.Items.getById(existingItem.id);
+  assert(finalItem.title === originalTitle + ' (本地最新修改)',
+    '本地标题应保持最新修改，不应被旧版本覆盖');
+  assert(finalItem.version === localVersionAfter, '本地版本号应保持不变');
+});
+
 console.log('\n=== 测试结果总结 ===');
 console.log(`通过: ${passed}`);
 console.log(`失败: ${failed}`);
