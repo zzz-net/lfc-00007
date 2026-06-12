@@ -1,0 +1,942 @@
+const { createApp, ref, computed, reactive, onMounted, watch } = Vue;
+
+createApp({
+  setup() {
+    const activeTab = ref('board');
+    const configTab = ref('shifts');
+
+    const shifts = ref([]);
+    const roles = ref([]);
+    const users = ref([]);
+    const checkItems = ref([]);
+    const items = ref([]);
+    const handoverRecords = ref([]);
+
+    const currentShiftId = ref('');
+    const currentShiftDate = ref('');
+    const handoverUserId = ref('');
+    const currentUserId = ref('');
+
+    const showAddItemModal = ref(false);
+    const showDetailModal = ref(false);
+    const showCloseModal = ref(false);
+    const showConfirmModal = ref(false);
+    const showConflictModal = ref(false);
+
+    const editingItem = ref(null);
+    const selectedItem = ref(null);
+    const closeReason = ref('');
+    const confirmChecks = reactive({});
+    const confirmError = ref('');
+    const conflictInfo = ref(null);
+
+    const editingBaseVersion = ref(0);
+
+    const toast = reactive({
+      show: false,
+      message: '',
+      type: 'info'
+    });
+
+    const historyFilter = reactive({
+      shiftId: '',
+      startDate: '',
+      endDate: ''
+    });
+
+    const filteredHistory = ref([]);
+
+    const itemForm = reactive({
+      title: '',
+      type: 'alert',
+      description: '',
+      assigneeId: ''
+    });
+
+    function showToast(message, type = 'info') {
+      toast.message = message;
+      toast.type = type;
+      toast.show = true;
+      setTimeout(() => {
+        toast.show = false;
+      }, 3000);
+    }
+
+    function formatTime(timestamp) {
+      if (!timestamp) return '-';
+      const date = new Date(timestamp);
+      const year = date.getFullYear();
+      const month = String(date.getMonth() + 1).padStart(2, '0');
+      const day = String(date.getDate()).padStart(2, '0');
+      const hours = String(date.getHours()).padStart(2, '0');
+      const minutes = String(date.getMinutes()).padStart(2, '0');
+      return `${year}-${month}-${day} ${hours}:${minutes}`;
+    }
+
+    function getRoleName(roleId) {
+      const role = roles.value.find(r => r.id === roleId);
+      return role ? role.name : '未知';
+    }
+
+    function getItemTypeName(type) {
+      const types = {
+        alert: '告警',
+        change: '变更',
+        other: '其他'
+      };
+      return types[type] || type;
+    }
+
+    function getStatusName(status) {
+      const statuses = {
+        new: '新建',
+        processing: '处理中',
+        pending_confirm: '待接班确认',
+        received: '已接收',
+        closed: '已关闭'
+      };
+      return statuses[status] || status;
+    }
+
+    function getHandoverStatusName(status) {
+      return status === 'confirmed' ? '已确认' : '待确认';
+    }
+
+    const currentShift = computed(() => {
+      return shifts.value.find(s => s.id === currentShiftId.value) || null;
+    });
+
+    const currentUser = computed(() => {
+      return users.value.find(u => u.id === currentUserId.value) || null;
+    });
+
+    const currentUserRole = computed(() => {
+      if (!currentUser.value) return null;
+      return roles.value.find(r => r.id === currentUser.value.roleId) || null;
+    });
+
+    const handoverUserName = computed(() => {
+      const user = users.value.find(u => u.id === handoverUserId.value);
+      return user ? user.name : '未设置';
+    });
+
+    const currentShiftItems = computed(() => {
+      return items.value.filter(item => 
+        item.shiftId === currentShiftId.value && 
+        item.shiftDate === currentShiftDate.value
+      );
+    });
+
+    const pendingConfirmItems = computed(() => {
+      return currentShiftItems.value.filter(item => item.status === 'pending_confirm');
+    });
+
+    function itemsByStatus(status) {
+      return currentShiftItems.value.filter(item => item.status === status);
+    }
+
+    const canEditItem = computed(() => {
+      if (!selectedItem.value || !currentUserRole.value) return false;
+      if (selectedItem.value.status === 'closed') return false;
+      return currentUserRole.value.canCreate || currentUserRole.value.canProcess;
+    });
+
+    const canStartProcessing = computed(() => {
+      if (!selectedItem.value || !currentUserRole.value) return false;
+      if (selectedItem.value.status !== 'new') return false;
+      return currentUserRole.value.canProcess;
+    });
+
+    const canSubmitForConfirm = computed(() => {
+      if (!selectedItem.value || !currentUserRole.value) return false;
+      if (selectedItem.value.status !== 'processing') return false;
+      return currentUserRole.value.canProcess;
+    });
+
+    const canCloseItem = computed(() => {
+      if (!selectedItem.value || !currentUserRole.value) return false;
+      if (selectedItem.value.status === 'closed') return false;
+      if (currentUserRole.value.canClose) return true;
+      if (selectedItem.value.creatorId === currentUserId.value && 
+          selectedItem.value.status === 'new') {
+        return true;
+      }
+      return false;
+    });
+
+    const canConfirm = computed(() => {
+      if (!currentUser.value) return false;
+      if (!currentUserRole.value) return false;
+      return currentUserRole.value.canConfirm;
+    });
+
+    function loadData() {
+      shifts.value = Store.Shifts.getAll();
+      roles.value = Store.Roles.getAll();
+      users.value = Store.Users.getAll();
+      checkItems.value = Store.CheckItems.getAll();
+      items.value = Store.Items.getAll();
+      handoverRecords.value = Store.HandoverRecords.getAll();
+
+      const currentShiftData = Store.CurrentShift.get();
+      currentShiftId.value = currentShiftData.shiftId || '';
+      currentShiftDate.value = currentShiftData.date || new Date().toISOString().split('T')[0];
+      handoverUserId.value = currentShiftData.handoverUserId || '';
+
+      currentUserId.value = Store.CurrentUser.get();
+
+      checkItems.value.forEach(item => {
+        if (!(item.id in confirmChecks)) {
+          confirmChecks[item.id] = false;
+        }
+      });
+
+      filterHistory();
+    }
+
+    function addShift() {
+      shifts.value.push({
+        id: Store.generateId('shift'),
+        name: '',
+        startTime: '08:00',
+        endTime: '16:00'
+      });
+    }
+
+    function removeShift(index) {
+      if (confirm('确定删除该班次吗？')) {
+        shifts.value.splice(index, 1);
+      }
+    }
+
+    function saveShifts() {
+      Store.Shifts.saveAll(shifts.value);
+      showToast('班次配置已保存', 'success');
+    }
+
+    function addRole() {
+      roles.value.push({
+        id: Store.generateId('role'),
+        name: '',
+        canCreate: false,
+        canProcess: false,
+        canClose: false,
+        canConfirm: false
+      });
+    }
+
+    function removeRole(index) {
+      if (confirm('确定删除该角色吗？')) {
+        roles.value.splice(index, 1);
+      }
+    }
+
+    function saveRoles() {
+      Store.Roles.saveAll(roles.value);
+      showToast('角色配置已保存', 'success');
+    }
+
+    function addUser() {
+      users.value.push({
+        id: Store.generateId('user'),
+        name: '',
+        roleId: ''
+      });
+    }
+
+    function removeUser(index) {
+      if (confirm('确定删除该用户吗？')) {
+        users.value.splice(index, 1);
+      }
+    }
+
+    function saveUsers() {
+      Store.Users.saveAll(users.value);
+      showToast('用户配置已保存', 'success');
+    }
+
+    function addCheckItem() {
+      checkItems.value.push({
+        id: Store.generateId('check'),
+        name: '',
+        required: false,
+        description: ''
+      });
+    }
+
+    function removeCheckItem(index) {
+      if (confirm('确定删除该检查项吗？')) {
+        checkItems.value.splice(index, 1);
+      }
+    }
+
+    function saveCheckItems() {
+      Store.CheckItems.saveAll(checkItems.value);
+      showToast('检查模板已保存', 'success');
+    }
+
+    function saveCurrentShift() {
+      Store.CurrentShift.save({
+        shiftId: currentShiftId.value,
+        date: currentShiftDate.value,
+        handoverUserId: handoverUserId.value
+      });
+      showToast('当前班次设置已保存', 'success');
+    }
+
+    function onUserChange() {
+      Store.CurrentUser.set(currentUserId.value);
+    }
+
+    function openItemDetail(item) {
+      selectedItem.value = { ...item };
+      showDetailModal.value = true;
+    }
+
+    function refreshSelectedItem() {
+      if (selectedItem.value) {
+        const fresh = Store.Items.getById(selectedItem.value.id);
+        if (fresh) {
+          selectedItem.value = { ...fresh };
+        }
+      }
+    }
+
+    function editItem() {
+      if (!canEditItem.value) return;
+
+      editingItem.value = selectedItem.value;
+      editingBaseVersion.value = selectedItem.value.version;
+      itemForm.title = selectedItem.value.title;
+      itemForm.type = selectedItem.value.type;
+      itemForm.description = selectedItem.value.description;
+      itemForm.assigneeId = selectedItem.value.assigneeId;
+      showDetailModal.value = false;
+      showAddItemModal.value = true;
+    }
+
+    function saveItem() {
+      if (!itemForm.title.trim()) {
+        showToast('请输入事项标题', 'error');
+        return;
+      }
+
+      if (!currentUser.value) {
+        showToast('请先选择当前用户', 'error');
+        return;
+      }
+
+      const assigneeUser = users.value.find(u => u.id === itemForm.assigneeId);
+
+      if (editingItem.value) {
+        const result = Store.Items.update(
+          editingItem.value.id,
+          {
+            title: itemForm.title.trim(),
+            type: itemForm.type,
+            description: itemForm.description,
+            assigneeId: itemForm.assigneeId,
+            assigneeName: assigneeUser ? assigneeUser.name : ''
+          },
+          currentUser.value,
+          editingBaseVersion.value
+        );
+
+        if (result.conflict) {
+          conflictInfo.value = {
+            baseVersion: editingBaseVersion.value,
+            latestVersion: result.latestVersion,
+            latestContent: result.latestItem.description
+          };
+          showConflictModal.value = true;
+          return;
+        }
+
+        if (result.success) {
+          showToast('事项已更新', 'success');
+          loadData();
+          showAddItemModal.value = false;
+          editingItem.value = null;
+          selectedItem.value = result.item;
+          showDetailModal.value = true;
+        } else {
+          showToast(result.error || '更新失败', 'error');
+        }
+      } else {
+        if (!currentShiftId.value) {
+          showToast('请先设置当前班次', 'error');
+          return;
+        }
+
+        if (!currentUserRole.value || !currentUserRole.value.canCreate) {
+          showToast('您没有创建事项的权限', 'error');
+          return;
+        }
+
+        const item = Store.Items.create(
+          {
+            title: itemForm.title.trim(),
+            type: itemForm.type,
+            description: itemForm.description,
+            shiftId: currentShiftId.value,
+            shiftDate: currentShiftDate.value,
+            assigneeId: itemForm.assigneeId,
+            assigneeName: assigneeUser ? assigneeUser.name : ''
+          },
+          currentUser.value
+        );
+
+        showToast('事项已创建', 'success');
+        loadData();
+        showAddItemModal.value = false;
+      }
+
+      resetItemForm();
+    }
+
+    function resetItemForm() {
+      itemForm.title = '';
+      itemForm.type = 'alert';
+      itemForm.description = '';
+      itemForm.assigneeId = '';
+      editingItem.value = null;
+      editingBaseVersion.value = 0;
+    }
+
+    function startProcessing() {
+      if (!canStartProcessing.value || !currentUser.value) return;
+
+      const result = Store.Items.startProcessing(
+        selectedItem.value.id,
+        currentUser.value,
+        selectedItem.value.version
+      );
+
+      if (result.conflict) {
+        conflictInfo.value = {
+          baseVersion: selectedItem.value.version,
+          latestVersion: result.latestVersion,
+          latestContent: result.latestItem.description
+        };
+        showConflictModal.value = true;
+        refreshSelectedItem();
+        return;
+      }
+
+      if (result.success) {
+        showToast('已开始处理', 'success');
+        loadData();
+        selectedItem.value = result.item;
+      } else {
+        showToast(result.error || '操作失败', 'error');
+      }
+    }
+
+    function submitForConfirm() {
+      if (!canSubmitForConfirm.value || !currentUser.value) return;
+
+      const result = Store.Items.submitForConfirm(
+        selectedItem.value.id,
+        currentUser.value,
+        selectedItem.value.version
+      );
+
+      if (result.conflict) {
+        conflictInfo.value = {
+          baseVersion: selectedItem.value.version,
+          latestVersion: result.latestVersion,
+          latestContent: result.latestItem.description
+        };
+        showConflictModal.value = true;
+        refreshSelectedItem();
+        return;
+      }
+
+      if (result.success) {
+        showToast('已提交待确认', 'success');
+        loadData();
+        selectedItem.value = result.item;
+      } else {
+        showToast(result.error || '操作失败', 'error');
+      }
+    }
+
+    function confirmClose() {
+      if (!closeReason.value.trim()) {
+        showToast('请输入关闭原因', 'error');
+        return;
+      }
+
+      if (!currentUser.value) {
+        showToast('请先选择当前用户', 'error');
+        return;
+      }
+
+      if (!currentUserRole.value || !currentUserRole.value.canClose) {
+        if (!(selectedItem.value.creatorId === currentUserId.value && 
+              selectedItem.value.status === 'new')) {
+          showToast('您没有关闭该事项的权限，只有当班有权限的角色才能关闭事项', 'error');
+          return;
+        }
+      }
+
+      const result = Store.Items.close(
+        selectedItem.value.id,
+        currentUser.value,
+        closeReason.value.trim(),
+        selectedItem.value.version
+      );
+
+      if (result.conflict) {
+        conflictInfo.value = {
+          baseVersion: selectedItem.value.version,
+          latestVersion: result.latestVersion,
+          latestContent: result.latestItem.description
+        };
+        showConflictModal.value = true;
+        showCloseModal.value = false;
+        refreshSelectedItem();
+        return;
+      }
+
+      if (result.success) {
+        showToast('事项已关闭', 'success');
+        loadData();
+        selectedItem.value = result.item;
+        showCloseModal.value = false;
+        closeReason.value = '';
+      } else {
+        showToast(result.error || '操作失败', 'error');
+      }
+    }
+
+    function resolveConflict() {
+      showConflictModal.value = false;
+      conflictInfo.value = null;
+      loadData();
+      if (selectedItem.value) {
+        refreshSelectedItem();
+      }
+    }
+
+    function confirmHandover() {
+      confirmError.value = '';
+
+      if (!currentUser.value) {
+        confirmError.value = '请先选择当前用户';
+        return;
+      }
+
+      if (!currentUserRole.value || !currentUserRole.value.canConfirm) {
+        confirmError.value = '您没有接班确认的权限';
+        return;
+      }
+
+      const missingRequired = checkItems.value.filter(item => item.required && !confirmChecks[item.id]);
+      if (missingRequired.length > 0) {
+        const names = missingRequired.map(i => i.name).join('、');
+        confirmError.value = `请先完成必填检查项：${names}`;
+        return;
+      }
+
+      const pendingItems = pendingConfirmItems.value;
+      for (const item of pendingItems) {
+        const result = Store.Items.receive(item.id, currentUser.value);
+        if (!result.success) {
+          confirmError.value = `确认事项 ${item.title} 失败：${result.error}`;
+          loadData();
+          return;
+        }
+      }
+
+      const checkedCount = checkItems.value.filter(item => confirmChecks[item.id]).length;
+      const checkResults = {};
+      checkItems.value.forEach(item => {
+        checkResults[item.id] = {
+          checked: confirmChecks[item.id],
+          name: item.name,
+          required: item.required
+        };
+      });
+
+      const itemsSnapshot = currentShiftItems.value.map(item => ({
+        id: item.id,
+        title: item.title,
+        type: item.type,
+        status: item.status,
+        description: item.description,
+        assigneeName: item.assigneeName
+      }));
+
+      const record = Store.HandoverRecords.create({
+        shiftId: currentShiftId.value,
+        shiftName: currentShift.value ? currentShift.value.name : '',
+        date: currentShiftDate.value,
+        handoverUserId: handoverUserId.value,
+        handoverName: handoverUserName.value,
+        takeoverUserId: currentUser.value.id,
+        takeoverName: currentUser.value.name,
+        handoverTime: Date.now(),
+        takeoverTime: Date.now(),
+        itemIds: currentShiftItems.value.map(i => i.id),
+        itemCount: currentShiftItems.value.length,
+        checkResults,
+        totalCount: checkItems.value.length,
+        checkedCount,
+        itemsSnapshot
+      });
+
+      Store.HandoverRecords.confirm(record.id, currentUser.value);
+
+      showToast('接班确认成功', 'success');
+      loadData();
+      showConfirmModal.value = false;
+    }
+
+    function filterHistory() {
+      let result = handoverRecords.value;
+
+      if (historyFilter.shiftId) {
+        result = result.filter(r => r.shiftId === historyFilter.shiftId);
+      }
+
+      if (historyFilter.startDate) {
+        result = result.filter(r => r.date >= historyFilter.startDate);
+      }
+
+      if (historyFilter.endDate) {
+        result = result.filter(r => r.date <= historyFilter.endDate);
+      }
+
+      result.sort((a, b) => {
+        if (a.date !== b.date) return b.date.localeCompare(a.date);
+        return (b.takeoverTime || 0) - (a.takeoverTime || 0);
+      });
+
+      filteredHistory.value = result;
+    }
+
+    function resetHistoryFilter() {
+      historyFilter.shiftId = '';
+      historyFilter.startDate = '';
+      historyFilter.endDate = '';
+      filterHistory();
+    }
+
+    function viewHandoverRecord(record) {
+      const itemsList = record.itemsSnapshot.map(i => 
+        `${getItemTypeName(i.type)} - ${i.title}（${getStatusName(i.status)}）`
+      ).join('\n');
+      
+      const checksList = Object.values(record.checkResults || {}).map(c => 
+        `${c.checked ? '✅' : '⬜'} ${c.name}${c.required ? ' *必填' : ''}`
+      ).join('\n');
+
+      alert(
+        `交接单详情\n\n` +
+        `班次：${record.shiftName}\n` +
+        `日期：${record.date}\n` +
+        `状态：${getHandoverStatusName(record.status)}\n\n` +
+        `交班人：${record.handoverName}\n` +
+        `接班人：${record.takeoverName || '未接班'}\n` +
+        `交班时间：${formatTime(record.handoverTime)}\n` +
+        `接班时间：${formatTime(record.takeoverTime)}\n\n` +
+        `检查项（${record.checkedCount}/${record.totalCount}）：\n${checksList}\n\n` +
+        `事项列表（${record.itemCount}项）：\n${itemsList || '无'}`
+      );
+    }
+
+    function exportHandover() {
+      if (!currentShiftId.value) {
+        showToast('请先设置当前班次', 'error');
+        return;
+      }
+
+      const currentItems = currentShiftItems.value;
+      
+      let content = `=====================================\n`;
+      content += `       值 班 交 接 单\n`;
+      content += `=====================================\n\n`;
+      content += `班次：${currentShift.value ? currentShift.value.name : '-'}\n`;
+      content += `日期：${currentShiftDate.value}\n`;
+      content += `时间：${currentShift.value ? currentShift.value.startTime + ' - ' + currentShift.value.endTime : '-'}\n`;
+      content += `交班人：${handoverUserName.value}\n`;
+      content += `接班人：${currentUser.value ? currentUser.value.name : '未确认'}\n`;
+      content += `生成时间：${formatTime(Date.now())}\n\n`;
+
+      content += `-------------------------------------\n`;
+      content += `          交接检查项\n`;
+      content += `-------------------------------------\n\n`;
+
+      checkItems.value.forEach((item, index) => {
+        const checked = confirmChecks[item.id] ? '✅' : '⬜';
+        const required = item.required ? ' *必填' : '';
+        content += `${index + 1}. ${checked} ${item.name}${required}\n`;
+        if (item.description) {
+          content += `   ${item.description}\n`;
+        }
+        content += `\n`;
+      });
+
+      content += `-------------------------------------\n`;
+      content += `          交接事项列表\n`;
+      content += `-------------------------------------\n\n`;
+
+      const statusGroups = {
+        'new': '一、新建事项',
+        'processing': '二、处理中事项',
+        'pending_confirm': '三、待接班确认事项',
+        'received': '四、已接收事项',
+        'closed': '五、已关闭事项'
+      };
+
+      let itemIndex = 1;
+      for (const [status, title] of Object.entries(statusGroups)) {
+        const statusItems = currentItems.filter(i => i.status === status);
+        if (statusItems.length > 0) {
+          content += `${title}（${statusItems.length}项）\n\n`;
+          statusItems.forEach(item => {
+            content += `  ${itemIndex}. [${getItemTypeName(item.type)}] ${item.title}\n`;
+            content += `     状态：${getStatusName(item.status)}    处理人：${item.assigneeName || '未分配'}\n`;
+            if (item.description) {
+              content += `     描述：${item.description}\n`;
+            }
+            if (item.closeReason) {
+              content += `     关闭原因：${item.closeReason}\n`;
+            }
+            content += `\n`;
+            itemIndex++;
+          });
+        }
+      }
+
+      content += `-------------------------------------\n`;
+      content += `          操作历史记录\n`;
+      content += `-------------------------------------\n\n`;
+
+      const allLogs = [];
+      currentItems.forEach(item => {
+        item.history.forEach(log => {
+          allLogs.push({
+            ...log,
+            itemTitle: item.title
+          });
+        });
+      });
+      allLogs.sort((a, b) => b.time - a.time);
+
+      allLogs.slice(0, 50).forEach(log => {
+        content += `[${formatTime(log.time)}] ${log.operatorName}\n`;
+        content += `  事项：${log.itemTitle}\n`;
+        content += `  操作：${log.action}（v${log.version}）\n`;
+        if (log.reason) {
+          content += `  原因：${log.reason}\n`;
+        }
+        if (log.content) {
+          content += `  内容：${log.content}\n`;
+        }
+        content += `\n`;
+      });
+
+      content += `=====================================\n`;
+      content += `       交接单结束\n`;
+      content += `=====================================\n`;
+
+      downloadFile(content, `交接单_${currentShiftDate.value}_${currentShift.value ? currentShift.value.name : ''}.txt`, 'text/plain');
+      showToast('交接单已导出', 'success');
+    }
+
+    function exportSingleHandover(record) {
+      let content = `=====================================\n`;
+      content += `       值 班 交 接 单\n`;
+      content += `=====================================\n\n`;
+      content += `班次：${record.shiftName}\n`;
+      content += `日期：${record.date}\n`;
+      content += `状态：${getHandoverStatusName(record.status)}\n`;
+      content += `交班人：${record.handoverName}\n`;
+      content += `接班人：${record.takeoverName || '未接班'}\n`;
+      content += `交班时间：${formatTime(record.handoverTime)}\n`;
+      content += `接班时间：${formatTime(record.takeoverTime)}\n\n`;
+
+      content += `-------------------------------------\n`;
+      content += `          交接检查项\n`;
+      content += `-------------------------------------\n\n`;
+
+      const checks = Object.values(record.checkResults || {});
+      checks.forEach((item, index) => {
+        const checked = item.checked ? '✅' : '⬜';
+        const required = item.required ? ' *必填' : '';
+        content += `${index + 1}. ${checked} ${item.name}${required}\n\n`;
+      });
+
+      content += `-------------------------------------\n`;
+      content += `          交接事项列表\n`;
+      content += `-------------------------------------\n\n`;
+
+      const items = record.itemsSnapshot || [];
+      items.forEach((item, index) => {
+        content += `${index + 1}. [${getItemTypeName(item.type)}] ${item.title}\n`;
+        content += `   状态：${getStatusName(item.status)}    处理人：${item.assigneeName || '未分配'}\n`;
+        if (item.description) {
+          content += `   描述：${item.description}\n`;
+        }
+        content += `\n`;
+      });
+
+      content += `=====================================\n`;
+      content += `       交接单结束\n`;
+      content += `=====================================\n`;
+
+      downloadFile(content, `交接单_${record.date}_${record.shiftName}.txt`, 'text/plain');
+      showToast('交接单已导出', 'success');
+    }
+
+    function downloadFile(content, filename, type) {
+      const blob = new Blob([content], { type: type + ';charset=utf-8' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = filename;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+    }
+
+    function createSampleData() {
+      if (confirm('创建样例数据会覆盖现有配置和数据，确定继续吗？')) {
+        Store.createSampleData();
+        loadData();
+        showToast('样例数据已创建', 'success');
+        activeTab.value = 'board';
+      }
+    }
+
+    function testVersionConflict() {
+      console.log('=== 版本冲突测试 ===');
+      const testItem = items.value[0];
+      if (!testItem) {
+        console.log('没有事项可测试');
+        return;
+      }
+
+      console.log('原始版本:', testItem.version);
+      
+      const result1 = Store.Items.update(testItem.id, { title: testItem.title + ' (修改1)' }, users.value[0], testItem.version);
+      console.log('第一次修改:', result1.success ? '成功' : '失败', '新版本:', result1.item?.version);
+
+      const result2 = Store.Items.update(testItem.id, { title: testItem.title + ' (修改2)' }, users.value[1], testItem.version);
+      console.log('第二次修改(基于旧版本):', result2.success ? '成功' : '失败', '冲突:', result2.conflict);
+      
+      loadData();
+    }
+
+    onMounted(() => {
+      loadData();
+
+      watch(showConfirmModal, (val) => {
+        if (val) {
+          confirmError.value = '';
+          checkItems.value.forEach(item => {
+            confirmChecks[item.id] = false;
+          });
+        }
+      });
+
+      watch(showAddItemModal, (val) => {
+        if (!val) {
+          resetItemForm();
+        }
+      });
+
+      watch(showCloseModal, (val) => {
+        if (!val) {
+          closeReason.value = '';
+        }
+      });
+    });
+
+    return {
+      activeTab,
+      configTab,
+      shifts,
+      roles,
+      users,
+      checkItems,
+      items,
+      handoverRecords,
+      currentShiftId,
+      currentShiftDate,
+      handoverUserId,
+      currentUserId,
+      showAddItemModal,
+      showDetailModal,
+      showCloseModal,
+      showConfirmModal,
+      showConflictModal,
+      editingItem,
+      selectedItem,
+      closeReason,
+      confirmChecks,
+      confirmError,
+      conflictInfo,
+      toast,
+      historyFilter,
+      filteredHistory,
+      itemForm,
+
+      currentShift,
+      currentUser,
+      currentUserRole,
+      handoverUserName,
+      pendingConfirmItems,
+
+      itemsByStatus,
+      canEditItem,
+      canStartProcessing,
+      canSubmitForConfirm,
+      canCloseItem,
+      canConfirm,
+
+      formatTime,
+      getRoleName,
+      getItemTypeName,
+      getStatusName,
+      getHandoverStatusName,
+
+      addShift,
+      removeShift,
+      saveShifts,
+      addRole,
+      removeRole,
+      saveRoles,
+      addUser,
+      removeUser,
+      saveUsers,
+      addCheckItem,
+      removeCheckItem,
+      saveCheckItems,
+      saveCurrentShift,
+      onUserChange,
+
+      openItemDetail,
+      editItem,
+      saveItem,
+      startProcessing,
+      submitForConfirm,
+      confirmClose,
+      resolveConflict,
+
+      confirmHandover,
+      exportHandover,
+      exportSingleHandover,
+
+      filterHistory,
+      resetHistoryFilter,
+      viewHandoverRecord,
+
+      createSampleData,
+      testVersionConflict
+    };
+  }
+}).mount('#app');

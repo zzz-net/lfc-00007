@@ -1,0 +1,577 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>值班交接白板</title>
+  <link rel="stylesheet" href="css/style.css">
+  <script src="https://unpkg.com/vue@3/dist/vue.global.prod.js"></script>
+</head>
+<body>
+  <div id="app">
+    <!-- 顶部导航 -->
+    <header class="header">
+      <div class="header-left">
+        <h1 class="logo">📋 值班交接白板</h1>
+        <span class="current-shift">
+          当前班次：<b>{{ currentShift ? currentShift.name : '未设置' }}</b>
+          <span v-if="currentUser">（{{ currentUser.name }} - {{ currentUser.roleName }}）</span>
+        </span>
+      </div>
+      <div class="header-right">
+        <select v-model="currentUserId" @change="onUserChange" class="user-select">
+          <option value="">选择当前用户</option>
+          <option v-for="user in users" :key="user.id" :value="user.id">
+            {{ user.name }}（{{ getRoleName(user.roleId) }}）
+          </option>
+        </select>
+        <button @click="activeTab = 'config'" class="btn btn-outline">⚙️ 配置</button>
+        <button @click="activeTab = 'history'" class="btn btn-outline">📜 历史记录</button>
+        <button @click="exportHandover" class="btn btn-primary">📤 导出交接单</button>
+      </div>
+    </header>
+
+    <!-- 主内容区 -->
+    <main class="main">
+      <!-- 看板视图 -->
+      <div v-if="activeTab === 'board'" class="board-view">
+        <div class="board-header">
+          <h2>
+            {{ currentShiftDate }} 交接班看板
+            <span v-if="currentShift" class="shift-time">{{ currentShift.startTime }} - {{ currentShift.endTime }}</span>
+          </h2>
+          <div class="board-actions">
+            <button @click="showAddItemModal = true" class="btn btn-primary">+ 新建事项</button>
+            <button @click="showConfirmModal = true" class="btn btn-success">✅ 接班确认</button>
+          </div>
+        </div>
+
+        <div class="kanban-columns">
+          <!-- 新建 -->
+          <div class="kanban-column">
+            <div class="column-header column-new">
+              <span class="column-title">新建</span>
+              <span class="column-count">{{ itemsByStatus('new').length }}</span>
+            </div>
+            <div class="column-items">
+              <div v-for="item in itemsByStatus('new')" :key="item.id" 
+                   class="item-card item-new"
+                   @click="openItemDetail(item)">
+                <div class="item-title">{{ item.title }}</div>
+                <div class="item-meta">
+                  <span class="item-type" :class="'type-' + item.type">{{ getItemTypeName(item.type) }}</span>
+                  <span class="item-creator">{{ item.creatorName }}</span>
+                </div>
+                <div class="item-desc">{{ item.description }}</div>
+                <div class="item-footer">
+                  <span class="item-version">v{{ item.version }}</span>
+                  <span class="item-time">{{ formatTime(item.createTime) }}</span>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <!-- 处理中 -->
+          <div class="kanban-column">
+            <div class="column-header column-processing">
+              <span class="column-title">处理中</span>
+              <span class="column-count">{{ itemsByStatus('processing').length }}</span>
+            </div>
+            <div class="column-items">
+              <div v-for="item in itemsByStatus('processing')" :key="item.id" 
+                   class="item-card item-processing"
+                   @click="openItemDetail(item)">
+                <div class="item-title">{{ item.title }}</div>
+                <div class="item-meta">
+                  <span class="item-type" :class="'type-' + item.type">{{ getItemTypeName(item.type) }}</span>
+                  <span class="item-assignee">{{ item.assigneeName || '未分配' }}</span>
+                </div>
+                <div class="item-desc">{{ item.description }}</div>
+                <div class="item-footer">
+                  <span class="item-version">v{{ item.version }}</span>
+                  <span class="item-time">{{ formatTime(item.updateTime) }}</span>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <!-- 待接班确认 -->
+          <div class="kanban-column">
+            <div class="column-header column-pending">
+              <span class="column-title">待接班确认</span>
+              <span class="column-count">{{ itemsByStatus('pending_confirm').length }}</span>
+            </div>
+            <div class="column-items">
+              <div v-for="item in itemsByStatus('pending_confirm')" :key="item.id" 
+                   class="item-card item-pending"
+                   @click="openItemDetail(item)">
+                <div class="item-title">{{ item.title }}</div>
+                <div class="item-meta">
+                  <span class="item-type" :class="'type-' + item.type">{{ getItemTypeName(item.type) }}</span>
+                  <span class="item-assignee">{{ item.assigneeName || '未分配' }}</span>
+                </div>
+                <div class="item-desc">{{ item.description }}</div>
+                <div class="item-footer">
+                  <span class="item-version">v{{ item.version }}</span>
+                  <span class="item-time">{{ formatTime(item.updateTime) }}</span>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <!-- 已接收 -->
+          <div class="kanban-column">
+            <div class="column-header column-received">
+              <span class="column-title">已接收</span>
+              <span class="column-count">{{ itemsByStatus('received').length }}</span>
+            </div>
+            <div class="column-items">
+              <div v-for="item in itemsByStatus('received')" :key="item.id" 
+                   class="item-card item-received"
+                   @click="openItemDetail(item)">
+                <div class="item-title">{{ item.title }}</div>
+                <div class="item-meta">
+                  <span class="item-type" :class="'type-' + item.type">{{ getItemTypeName(item.type) }}</span>
+                  <span class="item-assignee">{{ item.assigneeName || '未分配' }}</span>
+                </div>
+                <div class="item-desc">{{ item.description }}</div>
+                <div class="item-footer">
+                  <span class="item-version">v{{ item.version }}</span>
+                  <span class="item-time">{{ formatTime(item.updateTime) }}</span>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <!-- 已关闭 -->
+          <div class="kanban-column">
+            <div class="column-header column-closed">
+              <span class="column-title">已关闭</span>
+              <span class="column-count">{{ itemsByStatus('closed').length }}</span>
+            </div>
+            <div class="column-items">
+              <div v-for="item in itemsByStatus('closed')" :key="item.id" 
+                   class="item-card item-closed"
+                   @click="openItemDetail(item)">
+                <div class="item-title">{{ item.title }}</div>
+                <div class="item-meta">
+                  <span class="item-type" :class="'type-' + item.type">{{ getItemTypeName(item.type) }}</span>
+                  <span class="item-assignee">{{ item.assigneeName || '未分配' }}</span>
+                </div>
+                <div class="item-desc">{{ item.description }}</div>
+                <div class="item-footer">
+                  <span class="item-version">v{{ item.version }}</span>
+                  <span class="item-time">{{ formatTime(item.closeTime) }}</span>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- 配置页 -->
+      <div v-if="activeTab === 'config'" class="config-view">
+        <div class="config-tabs">
+          <button :class="['config-tab', { active: configTab === 'shifts' }]" @click="configTab = 'shifts'">班次配置</button>
+          <button :class="['config-tab', { active: configTab === 'roles' }]" @click="configTab = 'roles'">角色配置</button>
+          <button :class="['config-tab', { active: configTab === 'users' }]" @click="configTab = 'users'">用户配置</button>
+          <button :class="['config-tab', { active: configTab === 'templates' }]" @click="configTab = 'templates'">交接模板</button>
+          <button :class="['config-tab', { active: configTab === 'current' }]" @click="configTab = 'current'">当前班次</button>
+        </div>
+
+        <!-- 班次配置 -->
+        <div v-if="configTab === 'shifts'" class="config-panel">
+          <div class="panel-header">
+            <h3>班次配置</h3>
+            <button @click="addShift" class="btn btn-primary">+ 添加班次</button>
+          </div>
+          <div class="shift-list">
+            <div v-for="(shift, index) in shifts" :key="shift.id" class="shift-item">
+              <input v-model="shift.name" placeholder="班次名称" class="input-text">
+              <input v-model="shift.startTime" placeholder="开始时间 (HH:mm)" class="input-text input-time">
+              <input v-model="shift.endTime" placeholder="结束时间 (HH:mm)" class="input-text input-time">
+              <button @click="removeShift(index)" class="btn btn-danger btn-sm">删除</button>
+            </div>
+          </div>
+          <div class="panel-footer">
+            <button @click="saveShifts" class="btn btn-success">保存班次配置</button>
+          </div>
+        </div>
+
+        <!-- 角色配置 -->
+        <div v-if="configTab === 'roles'" class="config-panel">
+          <div class="panel-header">
+            <h3>角色配置</h3>
+            <button @click="addRole" class="btn btn-primary">+ 添加角色</button>
+          </div>
+          <div class="role-list">
+            <div v-for="(role, index) in roles" :key="role.id" class="role-item">
+              <input v-model="role.name" placeholder="角色名称" class="input-text">
+              <label class="checkbox-label">
+                <input type="checkbox" v-model="role.canCreate"> 可创建事项
+              </label>
+              <label class="checkbox-label">
+                <input type="checkbox" v-model="role.canProcess"> 可处理事项
+              </label>
+              <label class="checkbox-label">
+                <input type="checkbox" v-model="role.canClose"> 可关闭事项
+              </label>
+              <label class="checkbox-label">
+                <input type="checkbox" v-model="role.canConfirm"> 可接班确认
+              </label>
+              <button @click="removeRole(index)" class="btn btn-danger btn-sm">删除</button>
+            </div>
+          </div>
+          <div class="panel-footer">
+            <button @click="saveRoles" class="btn btn-success">保存角色配置</button>
+          </div>
+        </div>
+
+        <!-- 用户配置 -->
+        <div v-if="configTab === 'users'" class="config-panel">
+          <div class="panel-header">
+            <h3>用户配置</h3>
+            <button @click="addUser" class="btn btn-primary">+ 添加用户</button>
+          </div>
+          <div class="user-list">
+            <div v-for="(user, index) in users" :key="user.id" class="user-item">
+              <input v-model="user.name" placeholder="用户姓名" class="input-text">
+              <select v-model="user.roleId" class="input-select">
+                <option value="">选择角色</option>
+                <option v-for="role in roles" :key="role.id" :value="role.id">{{ role.name }}</option>
+              </select>
+              <button @click="removeUser(index)" class="btn btn-danger btn-sm">删除</button>
+            </div>
+          </div>
+          <div class="panel-footer">
+            <button @click="saveUsers" class="btn btn-success">保存用户配置</button>
+          </div>
+        </div>
+
+        <!-- 交接模板 -->
+        <div v-if="configTab === 'templates'" class="config-panel">
+          <div class="panel-header">
+            <h3>交接检查模板</h3>
+            <button @click="addCheckItem" class="btn btn-primary">+ 添加检查项</button>
+          </div>
+          <div class="checklist">
+            <div v-for="(item, index) in checkItems" :key="item.id" class="check-item">
+              <label class="checkbox-label">
+                <input type="checkbox" v-model="item.required"> 必填
+              </label>
+              <input v-model="item.name" placeholder="检查项名称" class="input-text">
+              <input v-model="item.description" placeholder="检查说明（可选）" class="input-text input-desc">
+              <button @click="removeCheckItem(index)" class="btn btn-danger btn-sm">删除</button>
+            </div>
+          </div>
+          <div class="panel-footer">
+            <button @click="saveCheckItems" class="btn btn-success">保存检查模板</button>
+          </div>
+        </div>
+
+        <!-- 当前班次 -->
+        <div v-if="configTab === 'current'" class="config-panel">
+          <div class="panel-header">
+            <h3>当前班次设置</h3>
+          </div>
+          <div class="current-shift-config">
+            <div class="form-group">
+              <label>选择当前班次：</label>
+              <select v-model="currentShiftId" class="input-select">
+                <option value="">请选择班次</option>
+                <option v-for="shift in shifts" :key="shift.id" :value="shift.id">{{ shift.name }}</option>
+              </select>
+            </div>
+            <div class="form-group">
+              <label>交班日期：</label>
+              <input type="date" v-model="currentShiftDate" class="input-text">
+            </div>
+            <div class="form-group">
+              <label>交班人：</label>
+              <select v-model="handoverUserId" class="input-select">
+                <option value="">请选择交班人</option>
+                <option v-for="user in users" :key="user.id" :value="user.id">{{ user.name }}（{{ getRoleName(user.roleId) }}）</option>
+              </select>
+            </div>
+            <button @click="saveCurrentShift" class="btn btn-success">保存当前班次设置</button>
+            <hr>
+            <button @click="createSampleData" class="btn btn-warning">🎯 创建样例数据（用于测试）</button>
+          </div>
+        </div>
+      </div>
+
+      <!-- 历史记录 -->
+      <div v-if="activeTab === 'history'" class="history-view">
+        <div class="history-header">
+          <h2>历史交接记录</h2>
+          <div class="history-filters">
+            <select v-model="historyFilter.shiftId" class="input-select">
+              <option value="">全部班次</option>
+              <option v-for="shift in shifts" :key="shift.id" :value="shift.id">{{ shift.name }}</option>
+            </select>
+            <input type="date" v-model="historyFilter.startDate" class="input-text">
+            <span>至</span>
+            <input type="date" v-model="historyFilter.endDate" class="input-text">
+            <button @click="filterHistory" class="btn btn-primary">筛选</button>
+            <button @click="resetHistoryFilter" class="btn btn-outline">重置</button>
+          </div>
+        </div>
+
+        <div class="history-list">
+          <div v-if="filteredHistory.length === 0" class="empty-state">
+            暂无历史记录
+          </div>
+          <div v-for="record in filteredHistory" :key="record.id" class="history-record">
+            <div class="record-header">
+              <span class="record-date">{{ record.date }} {{ record.shiftName }}</span>
+              <span class="record-status" :class="'status-' + record.status">
+                {{ getHandoverStatusName(record.status) }}
+              </span>
+            </div>
+            <div class="record-body">
+              <div class="record-info">
+                <span>交班人：{{ record.handoverName }}</span>
+                <span v-if="record.takeoverName">接班人：{{ record.takeoverName }}</span>
+                <span v-if="record.handoverTime">交班时间：{{ formatTime(record.handoverTime) }}</span>
+                <span v-if="record.takeoverTime">接班时间：{{ formatTime(record.takeoverTime) }}</span>
+              </div>
+              <div class="record-items">
+                <span>事项数量：{{ record.itemCount }}</span>
+                <span>检查项：{{ record.checkedCount }}/{{ record.totalCount }}</span>
+              </div>
+            </div>
+            <div class="record-actions">
+              <button @click="viewHandoverRecord(record)" class="btn btn-outline btn-sm">查看详情</button>
+              <button @click="exportSingleHandover(record)" class="btn btn-primary btn-sm">导出</button>
+            </div>
+          </div>
+        </div>
+      </div>
+    </main>
+
+    <!-- 新建/编辑事项弹窗 -->
+    <div v-if="showAddItemModal" class="modal-overlay" @click.self="showAddItemModal = false">
+      <div class="modal">
+        <div class="modal-header">
+          <h3>{{ editingItem ? '编辑事项' : '新建事项' }}</h3>
+          <button @click="showAddItemModal = false" class="modal-close">×</button>
+        </div>
+        <div class="modal-body">
+          <div class="form-group">
+            <label>事项标题 *</label>
+            <input v-model="itemForm.title" class="input-text" placeholder="请输入事项标题">
+          </div>
+          <div class="form-group">
+            <label>事项类型 *</label>
+            <select v-model="itemForm.type" class="input-select">
+              <option value="alert">未处理告警</option>
+              <option value="change">临时变更</option>
+              <option value="other">其他事项</option>
+            </select>
+          </div>
+          <div class="form-group">
+            <label>事项描述</label>
+            <textarea v-model="itemForm.description" class="input-textarea" rows="4" placeholder="请详细描述事项内容"></textarea>
+          </div>
+          <div class="form-group">
+            <label>处理人</label>
+            <select v-model="itemForm.assigneeId" class="input-select">
+              <option value="">未分配</option>
+              <option v-for="user in users" :key="user.id" :value="user.id">{{ user.name }}</option>
+            </select>
+          </div>
+        </div>
+        <div class="modal-footer">
+          <button @click="showAddItemModal = false" class="btn btn-outline">取消</button>
+          <button @click="saveItem" class="btn btn-primary">{{ editingItem ? '保存修改' : '创建事项' }}</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- 事项详情弹窗 -->
+    <div v-if="showDetailModal" class="modal-overlay" @click.self="showDetailModal = false">
+      <div class="modal modal-large">
+        <div class="modal-header">
+          <h3>事项详情 - {{ selectedItem?.title }}</h3>
+          <button @click="showDetailModal = false" class="modal-close">×</button>
+        </div>
+        <div class="modal-body">
+          <div v-if="selectedItem" class="detail-content">
+            <div class="detail-section">
+              <div class="detail-row">
+                <span class="detail-label">状态：</span>
+                <span class="status-badge" :class="'status-' + selectedItem.status">
+                  {{ getStatusName(selectedItem.status) }}
+                </span>
+              </div>
+              <div class="detail-row">
+                <span class="detail-label">类型：</span>
+                <span class="item-type" :class="'type-' + selectedItem.type">{{ getItemTypeName(selectedItem.type) }}</span>
+              </div>
+              <div class="detail-row">
+                <span class="detail-label">版本：</span>
+                <span>v{{ selectedItem.version }}</span>
+              </div>
+              <div class="detail-row">
+                <span class="detail-label">创建人：</span>
+                <span>{{ selectedItem.creatorName }}</span>
+              </div>
+              <div class="detail-row">
+                <span class="detail-label">处理人：</span>
+                <span>{{ selectedItem.assigneeName || '未分配' }}</span>
+              </div>
+              <div class="detail-row">
+                <span class="detail-label">创建时间：</span>
+                <span>{{ formatTime(selectedItem.createTime) }}</span>
+              </div>
+              <div class="detail-row">
+                <span class="detail-label">更新时间：</span>
+                <span>{{ formatTime(selectedItem.updateTime) }}</span>
+              </div>
+            </div>
+
+            <div class="detail-section">
+              <h4>事项描述</h4>
+              <p class="detail-desc">{{ selectedItem.description || '无' }}</p>
+            </div>
+
+            <div v-if="selectedItem.closeReason" class="detail-section">
+              <h4>关闭原因</h4>
+              <p class="detail-desc">{{ selectedItem.closeReason }}</p>
+            </div>
+
+            <div class="detail-section">
+              <h4>操作历史</h4>
+              <div class="history-timeline">
+                <div v-for="(log, index) in selectedItem.history" :key="index" class="timeline-item">
+                  <div class="timeline-dot"></div>
+                  <div class="timeline-content">
+                    <div class="timeline-header">
+                      <span class="timeline-action">{{ log.action }}</span>
+                      <span class="timeline-version">v{{ log.version }}</span>
+                    </div>
+                    <div class="timeline-meta">
+                      <span>{{ log.operatorName }}</span>
+                      <span>{{ formatTime(log.time) }}</span>
+                    </div>
+                    <div v-if="log.reason" class="timeline-reason">原因：{{ log.reason }}</div>
+                    <div v-if="log.content" class="timeline-content-detail">内容变更：{{ log.content }}</div>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+        <div class="modal-footer">
+          <button @click="editItem" class="btn btn-primary" v-if="canEditItem">✏️ 编辑</button>
+          <button @click="startProcessing" class="btn btn-warning" v-if="canStartProcessing">🔄 开始处理</button>
+          <button @click="submitForConfirm" class="btn btn-info" v-if="canSubmitForConfirm">📨 提交待确认</button>
+          <button @click="showCloseModal = true" class="btn btn-danger" v-if="canCloseItem">❌ 关闭</button>
+          <button @click="showDetailModal = false" class="btn btn-outline">关闭</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- 关闭事项弹窗 -->
+    <div v-if="showCloseModal" class="modal-overlay" @click.self="showCloseModal = false">
+      <div class="modal">
+        <div class="modal-header">
+          <h3>关闭事项</h3>
+          <button @click="showCloseModal = false" class="modal-close">×</button>
+        </div>
+        <div class="modal-body">
+          <div class="form-group">
+            <label>关闭原因 *</label>
+            <textarea v-model="closeReason" class="input-textarea" rows="4" placeholder="请输入关闭原因"></textarea>
+          </div>
+        </div>
+        <div class="modal-footer">
+          <button @click="showCloseModal = false" class="btn btn-outline">取消</button>
+          <button @click="confirmClose" class="btn btn-danger">确认关闭</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- 接班确认弹窗 -->
+    <div v-if="showConfirmModal" class="modal-overlay" @click.self="showConfirmModal = false">
+      <div class="modal modal-large">
+        <div class="modal-header">
+          <h3>接班确认</h3>
+          <button @click="showConfirmModal = false" class="modal-close">×</button>
+        </div>
+        <div class="modal-body">
+          <div v-if="!currentUser" class="alert alert-warning">
+            请先在顶部选择当前用户
+          </div>
+          <div v-else>
+            <div class="confirm-info">
+              <p><strong>交班班次：</strong>{{ currentShift?.name }}</p>
+              <p><strong>交班人：</strong>{{ handoverUserName }}</p>
+              <p><strong>接班人：</strong>{{ currentUser.name }}</p>
+            </div>
+
+            <h4>交接检查项</h4>
+            <div class="confirm-checklist">
+              <div v-for="item in checkItems" :key="item.id" class="check-item-row">
+                <label class="checkbox-label">
+                  <input type="checkbox" v-model="confirmChecks[item.id]" :disabled="!canConfirm">
+                  <span class="check-name">{{ item.name }}</span>
+                  <span v-if="item.required" class="required-mark">*必填</span>
+                </label>
+                <span v-if="item.description" class="check-desc">{{ item.description }}</span>
+              </div>
+            </div>
+
+            <h4>待确认事项（{{ pendingConfirmItems.length }}项）</h4>
+            <div class="confirm-items">
+              <div v-if="pendingConfirmItems.length === 0" class="empty-state small">
+                暂无待确认事项
+              </div>
+              <div v-for="item in pendingConfirmItems" :key="item.id" class="confirm-item-row">
+                <span class="item-type" :class="'type-' + item.type">{{ getItemTypeName(item.type) }}</span>
+                <span class="item-title">{{ item.title }}</span>
+              </div>
+            </div>
+
+            <div v-if="confirmError" class="alert alert-error">
+              {{ confirmError }}
+            </div>
+          </div>
+        </div>
+        <div class="modal-footer">
+          <button @click="showConfirmModal = false" class="btn btn-outline">取消</button>
+          <button @click="confirmHandover" class="btn btn-success" :disabled="!canConfirm">确认接班</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- 冲突提示弹窗 -->
+    <div v-if="showConflictModal" class="modal-overlay" @click.self="showConflictModal = false">
+      <div class="modal">
+        <div class="modal-header">
+          <h3>⚠️ 版本冲突</h3>
+        </div>
+        <div class="modal-body">
+          <p>该事项已被其他人更新过（当前版本 v{{ conflictInfo?.latestVersion }}，您基于 v{{ conflictInfo?.baseVersion }} 编辑）。</p>
+          <p>为避免覆盖他人的修改，请刷新后重新编辑。</p>
+          <div v-if="conflictInfo?.latestContent" class="conflict-content">
+            <h5>最新内容：</h5>
+            <p>{{ conflictInfo.latestContent }}</p>
+          </div>
+        </div>
+        <div class="modal-footer">
+          <button @click="resolveConflict" class="btn btn-primary">知道了</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- 提示消息 -->
+    <div v-if="toast.show" class="toast" :class="'toast-' + toast.type">
+      {{ toast.message }}
+    </div>
+  </div>
+
+  <script src="js/store.js"></script>
+  <script src="js/app.js"></script>
+</body>
+</html>
