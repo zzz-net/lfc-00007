@@ -505,6 +505,25 @@ const Store = (function() {
     const currentUsers = Users.getAll();
     const currentItems = Items.getAll();
 
+    const currentShiftById = {};
+    const currentShiftNames = [];
+    currentShifts.forEach(s => {
+      currentShiftById[s.id] = s;
+      currentShiftNames.push(s.name);
+    });
+
+    const currentUserById = {};
+    const currentUserNames = [];
+    currentUsers.forEach(u => {
+      currentUserById[u.id] = u;
+      currentUserNames.push(u.name);
+    });
+
+    const currentUnclosedItemById = {};
+    currentItems
+      .filter(i => i.status !== 'closed')
+      .forEach(i => { currentUnclosedItemById[i.id] = i; });
+
     const conflicts = {
       shiftNames: [],
       userNames: [],
@@ -512,30 +531,41 @@ const Store = (function() {
     };
 
     if (importData.shifts) {
-      const currentShiftNames = currentShifts.map(s => s.name);
       importData.shifts.forEach(shift => {
-        if (currentShiftNames.includes(shift.name)) {
+        const existingById = currentShiftById[shift.id];
+        if (existingById) {
+          if (existingById.name !== shift.name) {
+            conflicts.shiftNames.push(shift.name);
+          }
+        } else if (currentShiftNames.includes(shift.name)) {
           conflicts.shiftNames.push(shift.name);
         }
       });
     }
 
     if (importData.users) {
-      const currentUserNames = currentUsers.map(u => u.name);
       importData.users.forEach(user => {
-        if (currentUserNames.includes(user.name)) {
+        const existingById = currentUserById[user.id];
+        if (existingById) {
+          if (existingById.name !== user.name) {
+            conflicts.userNames.push(user.name);
+          }
+        } else if (currentUserNames.includes(user.name)) {
           conflicts.userNames.push(user.name);
         }
       });
     }
 
     if (importData.items) {
-      const unclosedItemIds = currentItems
-        .filter(i => i.status !== 'closed')
-        .map(i => i.id);
       importData.items.forEach(item => {
-        if (item.status !== 'closed' && unclosedItemIds.includes(item.id)) {
-          conflicts.unclosedItemIds.push(item.id);
+        if (item.status !== 'closed' && currentUnclosedItemById[item.id]) {
+          const existing = currentUnclosedItemById[item.id];
+          const hasDifference = existing.title !== item.title || 
+                                existing.status !== item.status ||
+                                existing.assigneeId !== item.assigneeId;
+          if (hasDifference) {
+            conflicts.unclosedItemIds.push(item.id);
+          }
         }
       });
     }
@@ -645,6 +675,10 @@ const Store = (function() {
 
     try {
       const beforeSummary = getCurrentDataSummary();
+      const conflictResult = {
+        hasConflicts: preview.hasConflicts,
+        conflicts: preview.conflicts
+      };
 
       if (data.shifts) Shifts.saveAll(data.shifts);
       if (data.roles) Roles.saveAll(data.roles);
@@ -656,7 +690,6 @@ const Store = (function() {
       if (data.recoveryLogs) RecoveryLogs.saveAll(data.recoveryLogs);
 
       const afterSummary = getCurrentDataSummary();
-      const conflictResult = detectConflicts(data);
 
       RecoveryLogs.add({
         action: '数据恢复',

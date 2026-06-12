@@ -421,20 +421,87 @@ test('冲突检测 - 同名班次、用户、未关闭事项', () => {
     users: [
       ...originalData.users,
       { id: 'new_user', name: '张三', roleId: 'role_admin' }
-    ],
-    items: [
-      ...originalData.items.map(i => ({ ...i, status: i.status === 'closed' ? 'closed' : 'processing' }))
     ]
   };
   
   const conflicts = Store.detectConflicts(importData);
   assert(conflicts.hasConflicts === true, '应检测到冲突');
-  assert(conflicts.conflicts.shiftNames.includes('白班'), '应检测到同名班次冲突');
-  assert(conflicts.conflicts.userNames.includes('张三'), '应检测到同名用户冲突');
+  assert(conflicts.conflicts.shiftNames.includes('白班'), '应检测到不同ID同名班次冲突');
+  assert(conflicts.conflicts.userNames.includes('张三'), '应检测到不同ID同名用户冲突');
+});
+
+test('冲突检测 - 同ID同名称不应为冲突', () => {
+  const originalData = Store.exportAllData();
   
+  const conflicts = Store.detectConflicts(originalData);
+  assert(conflicts.hasConflicts === false, '刚导出的数据不应有任何冲突');
+  assert(conflicts.conflicts.shiftNames.length === 0, '同ID同名称的班次不应是冲突');
+  assert(conflicts.conflicts.userNames.length === 0, '同ID同名称的用户不应是冲突');
+  assert(conflicts.conflicts.unclosedItemIds.length === 0, '同ID同内容的未关闭事项不应是冲突');
+});
+
+test('冲突检测 - 同ID不同名称应为冲突', () => {
+  const originalData = Store.exportAllData();
+  
+  const importData = {
+    ...originalData,
+    shifts: originalData.shifts.map(s => 
+      s.id === 'shift_morning' ? { ...s, name: '早班改名' } : s
+    ),
+    users: originalData.users.map(u => 
+      u.id === 'user_zhang' ? { ...u, name: '张三大改' } : u
+    )
+  };
+  
+  const conflicts = Store.detectConflicts(importData);
+  assert(conflicts.hasConflicts === true, '应检测到冲突');
+  assert(conflicts.conflicts.shiftNames.includes('早班改名'), '同ID不同名称的班次应是冲突');
+  assert(conflicts.conflicts.userNames.includes('张三大改'), '同ID不同名称的用户应是冲突');
+});
+
+test('冲突检测 - 未关闭事项同ID但内容不同应为冲突', () => {
+  const originalData = Store.exportAllData();
   const unclosedItems = originalData.items.filter(i => i.status !== 'closed');
+  
   if (unclosedItems.length > 0) {
-    assert(conflicts.conflicts.unclosedItemIds.length > 0, '应检测到未关闭事项ID冲突');
+    const modifiedData = {
+      ...originalData,
+      items: originalData.items.map(i => 
+        i.id === unclosedItems[0].id && i.status !== 'closed'
+          ? { ...i, title: i.title + ' (已修改)', assigneeId: 'user_li' }
+          : i
+      )
+    };
+    
+    const conflicts = Store.detectConflicts(modifiedData);
+    assert(conflicts.hasConflicts === true, '应检测到未关闭事项冲突');
+    assert(conflicts.conflicts.unclosedItemIds.includes(unclosedItems[0].id), '同ID但内容不同的未关闭事项应是冲突');
+  }
+});
+
+test('冲突检测 - 未关闭事项同ID且内容相同不应为冲突', () => {
+  const originalData = Store.exportAllData();
+  
+  const conflicts = Store.detectConflicts(originalData);
+  assert(conflicts.conflicts.unclosedItemIds.length === 0, '同ID同内容的未关闭事项不应是冲突');
+});
+
+test('冲突检测 - 已关闭事项即使ID相同也不为冲突', () => {
+  const originalData = Store.exportAllData();
+  const closedItems = originalData.items.filter(i => i.status === 'closed');
+  
+  if (closedItems.length > 0) {
+    const modifiedData = {
+      ...originalData,
+      items: originalData.items.map(i => 
+        i.id === closedItems[0].id
+          ? { ...i, title: i.title + ' (已修改)' }
+          : i
+      )
+    };
+    
+    const conflicts = Store.detectConflicts(modifiedData);
+    assert(conflicts.conflicts.unclosedItemIds.length === 0, '已关闭事项即使内容不同也不应是未关闭事项冲突');
   }
 });
 
@@ -448,6 +515,7 @@ test('导入预览功能', () => {
   assert(preview.currentSummary, '应有当前数据摘要');
   assert(preview.differences, '应有差异对比');
   assert(preview.totalChanges === 0, '相同数据应无差异');
+  assert(preview.hasConflicts === false, '相同数据应无冲突');
   
   const modifiedData = { ...originalData };
   modifiedData.items = [...modifiedData.items, { id: 'test_preview_item', title: '测试', status: 'new', version: 1 }];
@@ -535,6 +603,303 @@ test('恢复后持久化 - 数据保持一致', () => {
   
   const recoveredItem = reExported.items.find(i => i.id === 'test_persistence_item');
   assert(recoveredItem !== null, '重新导出应包含持久化测试事项');
+});
+
+test('回归：无冲突备份恢复 - 刚导出的JSON直接恢复，日志无冲突', () => {
+  Store.RecoveryLogs.saveAll([]);
+  
+  const adminUser = Store.Users.getById('user_zhang');
+  const originalData = Store.exportAllData();
+  const originalShiftCount = originalData.shifts.length;
+  const originalUserCount = originalData.users.length;
+  
+  const result = Store.executeImport(originalData, adminUser);
+  assert(result.success === true, '无冲突恢复应成功');
+  
+  const logs = Store.RecoveryLogs.getAll();
+  assert(logs.length === 1, '应有1条恢复日志');
+  assert(logs[0].succeeded === true, '恢复日志应标记成功');
+  assert(logs[0].conflicts === null, '无冲突恢复时conflicts应为null');
+  assert(logs[0].beforeSummary.shifts === originalShiftCount, '恢复前班次数量正确');
+  assert(logs[0].afterSummary.shifts === originalShiftCount, '恢复后班次数量正确');
+  assert(logs[0].beforeSummary.users === originalUserCount, '恢复前用户数量正确');
+  assert(logs[0].afterSummary.users === originalUserCount, '恢复后用户数量正确');
+  
+  const shiftsAfter = Store.Shifts.getAll();
+  assert(shiftsAfter.length === originalShiftCount, '班次数量应保持不变');
+  
+  const currentData = Store.exportAllData();
+  const preview = Store.previewImport(currentData);
+  assert(preview.hasConflicts === false, '重新预览当前数据应无冲突');
+});
+
+test('回归：真实同名班次冲突恢复 - 日志正确记录冲突', () => {
+  Store.RecoveryLogs.saveAll([]);
+  
+  const adminUser = Store.Users.getById('user_zhang');
+  const originalData = Store.exportAllData();
+  
+  const importData = {
+    ...originalData,
+    shifts: [
+      ...originalData.shifts,
+      { id: 'conflict_shift_id', name: '白班', startTime: '08:00', endTime: '17:00' }
+    ]
+  };
+  
+  const preview = Store.previewImport(importData);
+  assert(preview.hasConflicts === true, '应检测到真实冲突');
+  assert(preview.conflicts.shiftNames.includes('白班'), '冲突列表应包含白班');
+  assert(preview.conflicts.userNames.length === 0, '用户应无冲突');
+  assert(preview.conflicts.unclosedItemIds.length === 0, '事项应无冲突');
+  
+  const result = Store.executeImport(importData, adminUser);
+  assert(result.success === true, '有冲突的恢复也能成功执行');
+  
+  const logs = Store.RecoveryLogs.getAll();
+  assert(logs.length === 1, '应有1条恢复日志');
+  assert(logs[0].succeeded === true, '恢复日志应标记成功');
+  assert(logs[0].conflicts !== null, '有冲突恢复时conflicts不应为null');
+  assert(logs[0].conflicts.shiftNames.includes('白班'), '日志应记录白班冲突');
+  assert(logs[0].conflicts.userNames.length === 0, '日志用户冲突应为空');
+  assert(logs[0].conflicts.unclosedItemIds.length === 0, '日志事项冲突应为空');
+  
+  Store.Shifts.saveAll(originalData.shifts);
+});
+
+test('回归：真实同名用户冲突恢复 - 日志正确记录冲突', () => {
+  Store.RecoveryLogs.saveAll([]);
+  
+  const adminUser = Store.Users.getById('user_zhang');
+  const originalData = Store.exportAllData();
+  
+  const importData = {
+    ...originalData,
+    users: [
+      ...originalData.users,
+      { id: 'conflict_user_id', name: '李四', roleId: 'role_operator' }
+    ]
+  };
+  
+  const preview = Store.previewImport(importData);
+  assert(preview.hasConflicts === true, '应检测到用户冲突');
+  assert(preview.conflicts.userNames.includes('李四'), '冲突列表应包含李四');
+  
+  const result = Store.executeImport(importData, adminUser);
+  assert(result.success === true, '恢复应成功');
+  
+  const logs = Store.RecoveryLogs.getAll();
+  assert(logs[0].conflicts !== null, '日志应记录冲突');
+  assert(logs[0].conflicts.userNames.includes('李四'), '日志应记录李四冲突');
+  
+  Store.Users.saveAll(originalData.users);
+});
+
+test('回归：真实未关闭事项冲突恢复 - 日志正确记录冲突', () => {
+  const originalData = Store.exportAllData();
+  const unclosedItems = originalData.items.filter(i => i.status !== 'closed');
+  
+  if (unclosedItems.length > 0) {
+    Store.RecoveryLogs.saveAll([]);
+    
+    const adminUser = Store.Users.getById('user_zhang');
+    const targetItem = unclosedItems[0];
+    
+    const importData = {
+      ...originalData,
+      items: originalData.items.map(i => 
+        i.id === targetItem.id
+          ? { ...i, title: i.title + ' (从备份恢复)', assigneeId: 'user_li', assigneeName: '李四' }
+          : i
+      )
+    };
+    
+    const preview = Store.previewImport(importData);
+    assert(preview.hasConflicts === true, '应检测到未关闭事项冲突');
+    assert(preview.conflicts.unclosedItemIds.includes(targetItem.id), '冲突列表应包含事项ID');
+    
+    const result = Store.executeImport(importData, adminUser);
+    assert(result.success === true, '恢复应成功');
+    
+    const logs = Store.RecoveryLogs.getAll();
+    assert(logs[0].conflicts !== null, '日志应记录冲突');
+    assert(logs[0].conflicts.unclosedItemIds.includes(targetItem.id), '日志应记录事项冲突');
+    
+    Store.Items.saveAll(originalData.items);
+  }
+});
+
+test('回归：取消恢复 - 数据保持不变', () => {
+  const originalShifts = Store.Shifts.getAll();
+  const originalUsers = Store.Users.getAll();
+  const originalItems = Store.Items.getAll();
+  
+  const originalData = Store.exportAllData();
+  const modifiedData = {
+    ...originalData,
+    shifts: [...originalData.shifts, { id: 'cancel_test_shift', name: '取消测试班', startTime: '00:00', endTime: '23:59' }],
+    users: [...originalData.users, { id: 'cancel_test_user', name: '取消测试用户', roleId: 'role_observer' }],
+    items: [...originalData.items, { id: 'cancel_test_item', title: '取消测试事项', type: 'other', status: 'new', version: 1 }]
+  };
+  
+  const preview = Store.previewImport(modifiedData);
+  assert(preview.success === true, '预览应成功');
+  
+  Store.Shifts.saveAll(originalShifts);
+  Store.Users.saveAll(originalUsers);
+  Store.Items.saveAll(originalItems);
+  
+  const shiftsAfter = Store.Shifts.getAll();
+  const usersAfter = Store.Users.getAll();
+  const itemsAfter = Store.Items.getAll();
+  
+  assert(shiftsAfter.length === originalShifts.length, '取消恢复后班次数量不变');
+  assert(usersAfter.length === originalUsers.length, '取消恢复后用户数量不变');
+  assert(itemsAfter.length === originalItems.length, '取消恢复后事项数量不变');
+  assert(Store.Shifts.getById('cancel_test_shift') === null, '不应包含测试班次');
+  assert(Store.Users.getById('cancel_test_user') === null, '不应包含测试用户');
+  assert(Store.Items.getById('cancel_test_item') === null, '不应包含测试事项');
+});
+
+test('回归：权限不足 - 无法执行恢复', () => {
+  Store.RecoveryLogs.saveAll([]);
+  
+  const opUser = Store.Users.getById('user_li');
+  const originalData = Store.exportAllData();
+  const originalShiftCount = originalData.shifts.length;
+  
+  const modifiedData = {
+    ...originalData,
+    shifts: [...originalData.shifts, { id: 'perm_test_shift', name: '权限测试班', startTime: '00:00', endTime: '23:59' }]
+  };
+  
+  const result = Store.executeImport(modifiedData, opUser);
+  assert(result.success === false, '权限不足应失败');
+  assert(result.errors[0].includes('权限'), '错误信息应包含权限');
+  
+  const logs = Store.RecoveryLogs.getAll();
+  assert(logs.length === 1, '应有1条失败日志');
+  assert(logs[0].succeeded === false, '日志应标记失败');
+  assert(logs[0].reason.includes('权限'), '失败原因应包含权限');
+  
+  const shiftsAfter = Store.Shifts.getAll();
+  assert(shiftsAfter.length === originalShiftCount, '班次数量应不变');
+  assert(Store.Shifts.getById('perm_test_shift') === null, '不应包含测试班次');
+});
+
+test('回归：非法JSON - 结构校验失败', () => {
+  Store.RecoveryLogs.saveAll([]);
+  
+  const adminUser = Store.Users.getById('user_zhang');
+  
+  const invalidData1 = { missing: 'fields' };
+  const result1 = Store.executeImport(invalidData1, adminUser);
+  assert(result1.success === false, '缺少必要字段应失败');
+  
+  const invalidData2 = null;
+  const result2 = Store.executeImport(invalidData2, adminUser);
+  assert(result2.success === false, 'null数据应失败');
+  
+  const invalidData3 = { version: '1.1', exportTime: '2026-06-13T00:00:00.000Z', shifts: 'not_array' };
+  const result3 = Store.executeImport(invalidData3, adminUser);
+  assert(result3.success === false, '类型错误应失败');
+  
+  const logs = Store.RecoveryLogs.getAll();
+  assert(logs.length === 3, '应有3条失败日志');
+  assert(logs.every(l => l.succeeded === false), '所有日志应标记失败');
+  assert(logs[2].reason.includes('缺少'), '最早的日志原因应包含缺少字段');
+  assert(logs[1].reason.includes('格式错误'), '中间日志原因应包含格式错误');
+  assert(logs[0].reason.includes('应为数组'), '最新日志原因应包含类型错误');
+});
+
+test('回归：多种冲突同时存在 - 日志完整记录', () => {
+  Store.RecoveryLogs.saveAll([]);
+  
+  const adminUser = Store.Users.getById('user_zhang');
+  const originalData = Store.exportAllData();
+  const unclosedItems = originalData.items.filter(i => i.status !== 'closed');
+  
+  let importData = {
+    ...originalData,
+    shifts: [
+      ...originalData.shifts,
+      { id: 'multi_conflict_shift', name: '白班', startTime: '07:00', endTime: '16:00' }
+    ],
+    users: [
+      ...originalData.users,
+      { id: 'multi_conflict_user', name: '张三', roleId: 'role_observer' }
+    ]
+  };
+  
+  if (unclosedItems.length > 0) {
+    importData = {
+      ...importData,
+      items: importData.items.map(i => 
+        i.id === unclosedItems[0].id && i.status !== 'closed'
+          ? { ...i, title: i.title + ' (多重冲突)', status: 'processing' }
+          : i
+      )
+    };
+  }
+  
+  const preview = Store.previewImport(importData);
+  assert(preview.hasConflicts === true, '应检测到多重冲突');
+  assert(preview.conflicts.shiftNames.includes('白班'), '应包含班次冲突');
+  assert(preview.conflicts.userNames.includes('张三'), '应包含用户冲突');
+  
+  const result = Store.executeImport(importData, adminUser);
+  assert(result.success === true, '恢复应成功');
+  
+  const logs = Store.RecoveryLogs.getAll();
+  assert(logs[0].conflicts !== null, '日志应记录冲突');
+  assert(logs[0].conflicts.shiftNames.includes('白班'), '日志应包含班次冲突');
+  assert(logs[0].conflicts.userNames.includes('张三'), '日志应包含用户冲突');
+  
+  if (unclosedItems.length > 0) {
+    assert(preview.conflicts.unclosedItemIds.includes(unclosedItems[0].id), '应包含事项冲突');
+    assert(logs[0].conflicts.unclosedItemIds.includes(unclosedItems[0].id), '日志应包含事项冲突');
+  }
+  
+  Store.Shifts.saveAll(originalData.shifts);
+  Store.Users.saveAll(originalData.users);
+  Store.Items.saveAll(originalData.items);
+});
+
+test('回归：恢复日志摘要与实际结果一致', () => {
+  Store.RecoveryLogs.saveAll([]);
+  
+  const adminUser = Store.Users.getById('user_zhang');
+  const originalData = Store.exportAllData();
+  const originalItemCount = originalData.items.length;
+  const originalShiftCount = originalData.shifts.length;
+  
+  const newShift = { id: 'summary_test_shift', name: '摘要测试班', startTime: '06:00', endTime: '15:00' };
+  const newItem = { id: 'summary_test_item', title: '摘要测试事项', type: 'other', status: 'new', version: 1 };
+  
+  const importData = {
+    ...originalData,
+    shifts: [...originalData.shifts, newShift],
+    items: [...originalData.items, newItem]
+  };
+  
+  const result = Store.executeImport(importData, adminUser);
+  assert(result.success === true, '恢复应成功');
+  
+  const logs = Store.RecoveryLogs.getAll();
+  assert(logs.length === 1, '应有1条日志');
+  assert(logs[0].beforeSummary.shifts === originalShiftCount, '恢复前班次数量一致');
+  assert(logs[0].afterSummary.shifts === originalShiftCount + 1, '恢复后班次数量一致');
+  assert(logs[0].beforeSummary.items === originalItemCount, '恢复前事项数量一致');
+  assert(logs[0].afterSummary.items === originalItemCount + 1, '恢复后事项数量一致');
+  assert(logs[0].conflicts === null, '无冲突时日志正确');
+  
+  const actualShifts = Store.Shifts.getAll();
+  const actualItems = Store.Items.getAll();
+  assert(actualShifts.length === logs[0].afterSummary.shifts, '实际班次数量与日志一致');
+  assert(actualItems.length === logs[0].afterSummary.items, '实际事项数量与日志一致');
+  
+  Store.Shifts.saveAll(originalData.shifts);
+  Store.Items.saveAll(originalData.items);
 });
 
 test('权限不足时执行导入失败', () => {
