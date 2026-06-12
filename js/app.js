@@ -1089,7 +1089,7 @@ createApp({
         showToast('请先选择当前用户', 'error');
         return;
       }
-      const card = Store.ReviewCards.create({
+      const result = Store.ReviewCards.create({
         sourceType: reviewForm.sourceType,
         sourceId: reviewForm.sourceId,
         sourceSummary: reviewForm.sourceSummary,
@@ -1100,10 +1100,18 @@ createApp({
         followUpDeadline: reviewForm.followUpDeadline,
         conclusion: reviewForm.conclusion
       }, currentUser.value);
-      showToast('复盘卡已创建', 'success');
+      if (!result || !result.success) {
+        showToast(result?.error || '创建失败', 'error');
+        return;
+      }
+      if (result.created) {
+        showToast(result.message || '复盘卡已创建', 'success');
+      } else {
+        showToast(result.message || '该来源已有复盘卡，已复用现有卡', 'warning');
+      }
       showReviewModal.value = false;
       loadData();
-      openReviewDetail(card);
+      openReviewDetail(result.card);
     }
 
     function openReviewDetail(card) {

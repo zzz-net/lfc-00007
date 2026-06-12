@@ -992,7 +992,7 @@ test('创建复盘卡 - 从已关闭事项', () => {
   const closedItem = items.find(i => i.status === 'closed');
   
   if (closedItem) {
-    const card = Store.ReviewCards.create({
+    const createResult = Store.ReviewCards.create({
       sourceType: 'closed_item',
       sourceId: closedItem.id,
       sourceSummary: `[${closedItem.type}] ${closedItem.title}`,
@@ -1003,7 +1003,10 @@ test('创建复盘卡 - 从已关闭事项', () => {
       followUpDeadline: '2026-07-01',
       conclusion: '需增加磁盘监控阈值'
     }, adminUser);
+    const card = createResult.card;
     
+    assert(createResult.success === true, '创建应成功');
+    assert(createResult.created === true, '首次创建 created 应为 true');
     assert(card.id, '复盘卡应有ID');
     assert(card.sourceType === 'closed_item', '来源类型应为已关闭事项');
     assert(card.sourceId === closedItem.id, '来源ID应正确');
@@ -1029,14 +1032,16 @@ test('创建复盘卡 - 从交接记录', () => {
     const record = records[0];
     const existing = Store.ReviewCards.getBySourceId(record.id);
     if (!existing) {
-      const card = Store.ReviewCards.create({
+      const createResult = Store.ReviewCards.create({
         sourceType: 'handover_record',
         sourceId: record.id,
         sourceSummary: `${record.shiftName} ${record.date}`,
         hasRisk: false,
         conclusion: '本次交接顺利'
       }, adminUser);
+      const card = createResult.card;
       
+      assert(createResult.success === true, '创建应成功');
       assert(card.sourceType === 'handover_record', '来源类型应为交接记录');
       assert(card.sourceId === record.id, '来源ID应正确');
       assert(card.hasRisk === false, '遗留风险应为false');
@@ -1139,12 +1144,13 @@ test('普通值班员可以添加跟进说明', () => {
 
 test('班长删除复盘卡', () => {
   const adminUser = Store.Users.getById('user_zhang');
-  const testCard = Store.ReviewCards.create({
+  const createResult = Store.ReviewCards.create({
     sourceType: 'closed_item',
     sourceId: 'test_delete_item',
     sourceSummary: '测试删除',
     conclusion: '待删除'
   }, adminUser);
+  const testCard = createResult.card;
   
   const cardId = testCard.id;
   assert(Store.ReviewCards.getById(cardId) !== null, '复盘卡应存在');
@@ -1154,28 +1160,244 @@ test('班长删除复盘卡', () => {
   assert(Store.ReviewCards.getById(cardId) === null, '删除后复盘卡不应存在');
 });
 
-test('同一来源不能重复创建复盘卡', () => {
+test('同源重复创建 - 同一 sourceId 只保留首张，create 返回 created=false', () => {
   Store.ReviewCards.saveAll([]);
   
   const adminUser = Store.Users.getById('user_zhang');
-  Store.ReviewCards.create({
+  const firstResult = Store.ReviewCards.create({
     sourceType: 'closed_item',
-    sourceId: 'dup_test_item',
-    sourceSummary: '测试重复'
+    sourceId: 'dup_source_1',
+    sourceSummary: '首次创建的摘要',
+    hasRisk: true,
+    conclusion: '第一张复盘卡结论'
   }, adminUser);
   
-  const existing = Store.ReviewCards.getBySourceId('dup_test_item');
-  assert(existing !== null, '第一次创建应成功');
+  assert(firstResult.success === true, '第一次创建应成功');
+  assert(firstResult.created === true, '第一次 created 应为 true');
+  const firstId = firstResult.card.id;
+  assert(firstResult.card.conclusion === '第一张复盘卡结论', '第一次结论应为原始值');
   
-  Store.ReviewCards.create({
+  const secondResult = Store.ReviewCards.create({
     sourceType: 'closed_item',
-    sourceId: 'dup_test_item',
-    sourceSummary: '重复创建'
+    sourceId: 'dup_source_1',
+    sourceSummary: '第二次试图覆盖的摘要',
+    hasRisk: false,
+    conclusion: '试图覆盖复盘卡结论'
   }, adminUser);
+  
+  assert(secondResult.success === true, '第二次调用 success 仍为 true');
+  assert(secondResult.created === false, '第二次 created 应为 false');
+  assert(secondResult.card.id === firstId, '第二次应复用首张卡的 id，不应生成新卡');
+  assert(secondResult.card.sourceSummary === '首次创建的摘要', '不应被第二次数据覆盖');
+  assert(secondResult.card.conclusion === '第一张复盘卡结论', '不应被第二次结论覆盖');
+  assert(secondResult.message && secondResult.message.includes('复用'), '应返回复用提示');
   
   const allCards = Store.ReviewCards.getAll();
-  const dupCount = allCards.filter(c => c.sourceId === 'dup_test_item').length;
-  assert(dupCount >= 1, '重复创建应至少保留一张');
+  const dupCount = allCards.filter(c => c.sourceId === 'dup_source_1').length;
+  assert(dupCount === 1, '同一 sourceId 最终应只有一张卡');
+});
+
+test('不同来源正常创建 - 不同 sourceId 各自独立创建', () => {
+  Store.ReviewCards.saveAll([]);
+  
+  const adminUser = Store.Users.getById('user_zhang');
+  const r1 = Store.ReviewCards.create({
+    sourceType: 'closed_item',
+    sourceId: 'diff_source_a',
+    sourceSummary: '来源A',
+    conclusion: '结论A'
+  }, adminUser);
+  
+  const r2 = Store.ReviewCards.create({
+    sourceType: 'handover_record',
+    sourceId: 'diff_source_b',
+    sourceSummary: '来源B',
+    conclusion: '结论B'
+  }, adminUser);
+  
+  const r3 = Store.ReviewCards.create({
+    sourceType: 'closed_item',
+    sourceId: 'diff_source_c',
+    sourceSummary: '来源C',
+    conclusion: '结论C'
+  }, adminUser);
+  
+  assert(r1.created === true, '来源A created=true');
+  assert(r2.created === true, '来源B created=true');
+  assert(r3.created === true, '来源C created=true');
+  assert(r1.card.id !== r2.card.id, '不同来源卡ID应不同');
+  assert(r2.card.id !== r3.card.id, '不同来源卡ID应不同');
+  
+  const allCards = Store.ReviewCards.getAll();
+  assert(allCards.length === 3, '三个不同来源应创建3张卡');
+});
+
+test('导出 JSON 不含重复复盘卡 - 每个 sourceId 只出现一次', () => {
+  Store.ReviewCards.saveAll([]);
+  
+  const adminUser = Store.Users.getById('user_zhang');
+  
+  Store.ReviewCards.create({
+    sourceType: 'closed_item',
+    sourceId: 'export_src_1',
+    conclusion: '导出测试1'
+  }, adminUser);
+  Store.ReviewCards.create({
+    sourceType: 'closed_item',
+    sourceId: 'export_src_2',
+    conclusion: '导出测试2'
+  }, adminUser);
+  
+  // 手工模拟脏数据 - 直接塞一张重复 sourceId 卡（绕过 create 和 saveAll）
+  const cleanCards = JSON.parse(localStorage.getItem('handover_review_cards') || '[]');
+  const dirtyCards = [
+    ...cleanCards,
+    {
+      id: 'review_dirty_dup',
+      sourceType: 'closed_item',
+      sourceId: 'export_src_1',
+      sourceSummary: '脏重复数据',
+      hasRisk: false,
+      riskDescription: '',
+      responsiblePersonId: '',
+      responsiblePersonName: '',
+      followUpDeadline: '',
+      conclusion: '脏重复',
+      followUpNotes: [],
+      logs: [],
+      creatorId: 'dirty',
+      creatorName: '脏数据',
+      createTime: Date.now(),
+      updateTime: Date.now()
+    }
+  ];
+  localStorage.setItem('handover_review_cards', JSON.stringify(dirtyCards));
+  
+  // 直接读原始 localStorage 验证脏数据确实插入成功（不经过 getAll）
+  const rawBefore = JSON.parse(localStorage.getItem('handover_review_cards') || '[]');
+  const dupRaw = rawBefore.filter(c => c.sourceId === 'export_src_1').length;
+  assert(dupRaw > 1, '测试前置条件：直接读 localStorage 应看到重复数据（脏数据插入成功）');
+  
+  // 现在走正常的 export 路径（内部会调 getAll → 自动去重）
+  const exported = Store.exportAllData();
+  const reviewCards = exported.reviewCards;
+  const sourceIds = reviewCards.map(c => c.sourceId);
+  const uniqueIds = new Set(sourceIds);
+  
+  assert(reviewCards.length === uniqueIds.size, '导出的 reviewCards 中每个 sourceId 应唯一，不应有重复');
+  assert(reviewCards.length === 2, '导出后去重，应有2张（export_src_1 + export_src_2）');
+  
+  const src1Card = reviewCards.find(c => c.sourceId === 'export_src_1');
+  assert(src1Card.conclusion === '导出测试1', '去重后保留的应是原始卡，不是脏重复');
+  
+  // 顺便验证：getAll 读完后已经自动修好了存储
+  const rawAfter = JSON.parse(localStorage.getItem('handover_review_cards') || '[]');
+  const dupAfter = rawAfter.filter(c => c.sourceId === 'export_src_1').length;
+  assert(dupAfter === 1, '经过 getAll 后，localStorage 里的脏重复也被清理了');
+});
+
+test('恢复导入后继续创建仍不重复 - saveAll 去重 + create 幂等双保险', () => {
+  Store.ReviewCards.saveAll([]);
+  Store.RecoveryLogs.saveAll([]);
+  
+  const adminUser = Store.Users.getById('user_zhang');
+  
+  // 构造一份包含重复 sourceId 的导出包（模拟外部手工拼接或老版本产生的重复数据）
+  const t0 = Date.now() - 100000;
+  const t1 = t0 + 1;
+  const sampleData = {
+    shifts: Store.Shifts.getAll(),
+    roles: Store.Roles.getAll(),
+    users: Store.Users.getAll(),
+    checkItems: Store.CheckItems.getAll(),
+    items: Store.Items.getAll(),
+    currentShift: Store.CurrentShift.get(),
+    handoverRecords: Store.HandoverRecords.getAll(),
+    recoveryLogs: [],
+    reviewCards: [
+      {
+        id: 'review_import_1_older',
+        sourceType: 'closed_item',
+        sourceId: 'import_src_X',
+        sourceSummary: '导入重复卡1（更早）',
+        hasRisk: false,
+        riskDescription: '',
+        responsiblePersonId: '',
+        responsiblePersonName: '',
+        followUpDeadline: '',
+        conclusion: '较早的卡',
+        followUpNotes: [],
+        logs: [{ action: '创建复盘卡', operatorId: 'user_zhang', operatorName: '张三', time: t0, detail: '' }],
+        creatorId: 'user_zhang',
+        creatorName: '张三',
+        createTime: t0,
+        updateTime: t0
+      },
+      {
+        id: 'review_import_1_newer',
+        sourceType: 'closed_item',
+        sourceId: 'import_src_X',
+        sourceSummary: '导入重复卡2（较新）',
+        hasRisk: true,
+        riskDescription: '',
+        responsiblePersonId: '',
+        responsiblePersonName: '',
+        followUpDeadline: '',
+        conclusion: '较新的卡',
+        followUpNotes: [],
+        logs: [{ action: '创建复盘卡', operatorId: 'user_zhang', operatorName: '张三', time: t1, detail: '' }],
+        creatorId: 'user_zhang',
+        creatorName: '张三',
+        createTime: t1,
+        updateTime: t1
+      },
+      {
+        id: 'review_import_2',
+        sourceType: 'handover_record',
+        sourceId: 'import_src_Y',
+        sourceSummary: '独立的卡',
+        hasRisk: false,
+        riskDescription: '',
+        responsiblePersonId: '',
+        responsiblePersonName: '',
+        followUpDeadline: '',
+        conclusion: '独立结论',
+        followUpNotes: [],
+        logs: [],
+        creatorId: 'user_zhang',
+        creatorName: '张三',
+        createTime: Date.now(),
+        updateTime: Date.now()
+      }
+    ],
+    exportTime: new Date().toISOString(),
+    version: '1.1'
+  };
+  
+  const importResult = Store.executeImport(sampleData, adminUser);
+  assert(importResult.success === true, '导入应成功');
+  
+  const afterImport = Store.ReviewCards.getAll();
+  const xCount = afterImport.filter(c => c.sourceId === 'import_src_X').length;
+  assert(xCount === 1, '导入后 sourceId=X 只有一张卡（saveAll 去重生效）');
+  
+  const xCard = afterImport.find(c => c.sourceId === 'import_src_X');
+  assert(xCard.conclusion === '较早的卡', '去重保留 createTime 较早的那张');
+  assert(afterImport.filter(c => c.sourceId === 'import_src_Y').length === 1, 'sourceId=Y 正常保留');
+  
+  // 再对 X 调一次 create，确认幂等拦截仍生效
+  const recreateResult = Store.ReviewCards.create({
+    sourceType: 'closed_item',
+    sourceId: 'import_src_X',
+    sourceSummary: '导入后再次创建',
+    conclusion: '不应出现'
+  }, adminUser);
+  
+  assert(recreateResult.created === false, '导入后对已有 sourceId 再 create，created 应为 false');
+  assert(recreateResult.card.id === xCard.id, '应复用导入后保留的那张卡 id');
+  
+  const finalCards = Store.ReviewCards.getAll();
+  assert(finalCards.length === 2, '最终只有 2 张（import_src_X + import_src_Y），没有新增');
 });
 
 test('复盘卡权限校验方法', () => {
@@ -1200,7 +1422,7 @@ test('复盘卡导出恢复后持久化', () => {
   
   const adminUser = Store.Users.getById('user_zhang');
   
-  const card = Store.ReviewCards.create({
+  const createResult = Store.ReviewCards.create({
     sourceType: 'closed_item',
     sourceId: 'persist_test_item',
     sourceSummary: '持久化测试事项',
@@ -1211,6 +1433,8 @@ test('复盘卡导出恢复后持久化', () => {
     followUpDeadline: '2026-08-01',
     conclusion: '持久化测试结论'
   }, adminUser);
+  const card = createResult.card;
+  assert(createResult.created === true, '首次创建 created=true');
   
   Store.ReviewCards.addFollowUpNote(card.id, '持久化跟进说明', Store.Users.getById('user_li'));
   Store.ReviewCards.updateConclusion(card.id, { conclusion: '更新后的结论' }, adminUser);

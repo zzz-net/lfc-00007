@@ -367,10 +367,30 @@ const Store = (function() {
 
   const ReviewCards = {
     getAll() {
-      return getFromStorage(STORAGE_KEYS.REVIEW_CARDS, []);
+      const raw = getFromStorage(STORAGE_KEYS.REVIEW_CARDS, []);
+      const seen = new Map();
+      for (const card of raw) {
+        if (!card || !card.sourceId) continue;
+        if (!seen.has(card.sourceId) || card.createTime < seen.get(card.sourceId).createTime) {
+          seen.set(card.sourceId, card);
+        }
+      }
+      const deduped = Array.from(seen.values());
+      if (deduped.length !== raw.length) {
+        saveToStorage(STORAGE_KEYS.REVIEW_CARDS, deduped);
+      }
+      return deduped;
     },
     saveAll(cards) {
-      return saveToStorage(STORAGE_KEYS.REVIEW_CARDS, cards);
+      const seen = new Map();
+      for (const card of cards) {
+        if (!card || !card.sourceId) continue;
+        if (!seen.has(card.sourceId) || card.createTime < seen.get(card.sourceId).createTime) {
+          seen.set(card.sourceId, card);
+        }
+      }
+      const deduped = Array.from(seen.values());
+      return saveToStorage(STORAGE_KEYS.REVIEW_CARDS, deduped);
     },
     getById(id) {
       return this.getAll().find(c => c.id === id) || null;
@@ -379,6 +399,13 @@ const Store = (function() {
       return this.getAll().find(c => c.sourceId === sourceId) || null;
     },
     create(data, operator) {
+      if (!data || !data.sourceId) {
+        return { success: false, error: '缺少来源ID', card: null, created: false };
+      }
+      const existing = this.getBySourceId(data.sourceId);
+      if (existing) {
+        return { success: true, card: existing, created: false, message: '该来源已有复盘卡，复用现有卡' };
+      }
       const now = Date.now();
       const card = {
         id: generateId('review'),
@@ -407,7 +434,7 @@ const Store = (function() {
       const cards = this.getAll();
       cards.push(card);
       this.saveAll(cards);
-      return card;
+      return { success: true, card, created: true, message: '复盘卡已创建' };
     },
     updateConclusion(id, data, operator) {
       const cards = this.getAll();
