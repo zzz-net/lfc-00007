@@ -2755,6 +2755,453 @@ test('查询 - 按用户和按班次筛选', () => {
   assert(byShift.length >= 1, '按班次查询应至少有 1 条');
 });
 
+console.log('\n--- 11. 临时协同处置室测试 ---');
+
+// 重置环境
+localStorage.clear();
+Store.createSampleData();
+
+// 获取测试用户
+const drAdmin = Store.Users.getById('user_zhang');       // 班长
+const drOperator = Store.Users.getById('user_li');       // 运维值班员
+const drObserver = Store.Users.getById('user_zhao');     // 观察员（赵六）
+const drAnotherOperator = Store.Users.getById('user_wang'); // 另一个值班员（王五）
+
+// 获取测试事项，用 sourceItemId 创建关联
+const drSourceItem = Store.Items.create({
+  title: '处置室测试事项：核心交换机告警',
+  content: '核心交换机端口反复 DOWN/UP',
+  level: 'high',
+  assigneeId: 'user_li',
+  assigneeName: '李四',
+  exceptionType: 'net',
+  shiftId: 'shift_morning'
+}, drOperator);
+const drItemId = drSourceItem.id;
+
+test('协同处置室 - 数据模型字段完整性', () => {
+  const levels = Store.CollabRooms.LEVELS;
+  assert(levels && Object.keys(levels).length === 4, '应有 4 个级别定义');
+  assert(levels.urgent.name === '紧急' && levels.high.name === '高' && levels.medium.name === '中' && levels.low.name === '低',
+    '级别名称应正确映射');
+});
+
+test('协同处置室 - 创建成功与日志写入', () => {
+  const result = Store.CollabRooms.create({
+    sourceItemId: drItemId,
+    sourceItemTitle: '处置室测试事项：核心交换机告警',
+    title: '核心交换机端口异常协同处置',
+    level: 'urgent',
+    impactScope: '全网业务可能受影响，办公网已出现卡顿',
+    target: '2小时内定位根因并恢复端口稳定',
+    deadline: new Date(Date.now() + 2 * 3600 * 1000).toISOString().slice(0, 16),
+    participantIds: ['user_zhang', 'user_li', 'user_wang']
+  }, drOperator);
+
+  assert(result.success === true, `创建应成功，错误信息:${result.error || ''}`);
+  assert(result.room, '应返回 room 对象');
+  assert(result.room.id && result.room.id.startsWith('room_'), 'ID 格式应为 room_xxx');
+  assert(result.room.status === 'active', '初始状态应为 active');
+  assert(result.room.version === 1, '初始版本应为 1');
+  assert(result.room.creatorId === 'user_li', '创建者应为值班员');
+  assert(result.room.participants.length === 3, `参与者数量应为 3，实际 ${result.room.participants.length}`);
+  assert(result.room.messages.length === 0, '初始消息为空');
+  assert(result.room.pendingQuestions.length === 0, '初始待确认问题为空');
+  assert(result.room.logs.length >= 1, `至少应有 1 条创建日志，实际 ${result.room.logs.length}`);
+  assert(result.room.logs[0].action === '创建处置室', '首条日志应为创建处置室');
+  assert(result.room.sourceItemId === drItemId, '应关联事项 ID');
+});
+
+test('协同处置室 - 重复拉起拦截（同一事项重复创建）', () => {
+  const result = Store.CollabRooms.create({
+    sourceItemId: drItemId,
+    title: '第二次拉起 - 应该失败',
+    level: 'medium',
+    impactScope: '...',
+    target: '...',
+    deadline: new Date().toISOString().slice(0, 16),
+    participantIds: ['user_zhang']
+  }, drAdmin);
+
+  assert(result.success === false, '同一事项重复拉起应失败');
+  assert(result.conflict === true, '应标记为冲突');
+  assert(result.conflictType === 'duplicate_room', `冲突类型应为 duplicate_room，实际 ${result.conflictType}`);
+  assert(result.existingRoomId, '应返回已存在的处置室 ID');
+});
+
+test('协同处置室 - 权限验证（观察员无创建权限）', () => {
+  const result = Store.CollabRooms.create({
+    title: '观察员创建应失败',
+    level: 'low',
+    impactScope: 'x', target: 'y',
+    deadline: new Date().toISOString().slice(0, 16),
+    participantIds: ['user_wang']
+  }, drObserver);
+
+  assert(result.success === false, '观察员创建应失败');
+  assert(result.conflictType === 'permission', `冲突类型应为 permission，实际 ${result.conflictType}`);
+});
+
+test('协同处置室 - 查询方法', () => {
+  const all = Store.CollabRooms.getAll();
+  assert(all.length === 1, 'getAll 应有 1 条');
+
+  const byId = Store.CollabRooms.getById(all[0].id);
+  assert(byId && byId.id === all[0].id, 'getById 应正确返回');
+
+  const bySource = Store.CollabRooms.getActiveBySourceItemId(drItemId);
+  assert(bySource, 'getActiveBySourceItemId 应找到处置室');
+  assert(bySource.sourceItemId === drItemId, '关联事项应匹配');
+
+  const byZhang = Store.CollabRooms.getByParticipant('user_zhang');
+  assert(byZhang.length === 1, '张三参与的处置室应有 1 条');
+  const byZhao = Store.CollabRooms.getByParticipant('user_zhao');
+  assert(byZhao.length === 0, '赵六（观察员）不应在任何处置室中');
+});
+
+test('协同处置室 - 权限检查方法', () => {
+  const room = Store.CollabRooms.getAll()[0];
+
+  // 班长权限
+  assert(Store.CollabRooms.canManageMembers(room, drAdmin) === true, '班长应能调整成员');
+  assert(Store.CollabRooms.canClose(room, drAdmin) === true, '班长应能关闭');
+  assert(Store.CollabRooms.canAddMessage(room, drAdmin) === true, '班长应能发消息');
+  assert(Store.CollabRooms.canEditBasic(room, drAdmin) === true, '班长应能编辑基本信息');
+
+  // 普通值班员（参与者 + 创建者）权限
+  assert(Store.CollabRooms.canManageMembers(room, drOperator) === false, '值班员不应能调整成员');
+  assert(Store.CollabRooms.canClose(room, drOperator) === false, '值班员不应能关闭');
+  assert(Store.CollabRooms.canAddMessage(room, drOperator) === true, '值班员（参与者）应能发消息');
+  assert(Store.CollabRooms.canEditBasic(room, drOperator) === true, '值班员（创建者）应能编辑基本信息');
+
+  // 非参与者权限（观察员赵六，未加入）
+  assert(Store.CollabRooms.canAddMessage(room, drObserver) === false, '非参与者不应能发消息');
+});
+
+test('协同处置室 - 添加进展消息（带附件）', () => {
+  const room = Store.CollabRooms.getAll()[0];
+  const startVer = room.version;
+
+  const result = Store.CollabRooms.addProgress(
+    room.id,
+    '已现场排查，发现光模块温度异常偏高 78℃，已准备好备用模块',
+    [
+      { name: '温度监控截图.txt', content: '15:23 端口温度 78℃，阈值 70℃' },
+      { name: '光模块型号对照表.txt', content: 'SFP+ 10G SR，编号 XXX-123' }
+    ],
+    drOperator
+  );
+
+  assert(result.success === true, `添加进展应成功，${result.error || ''}`);
+  assert(result.room.version === startVer + 1, '版本应 +1');
+
+  const refreshed = Store.CollabRooms.getById(room.id);
+  assert(refreshed.messages.length === 1, `应新增 1 条消息，实际 ${refreshed.messages.length}`);
+  assert(refreshed.messages[0].type === 'progress', '消息类型应为 progress');
+  assert(refreshed.messages[0].attachments.length === 2, '应带 2 个附件');
+  assert(refreshed.messages[0].operatorId === 'user_li', '发送人应为李四');
+  assert(refreshed.logs.some(l => l.action === '补充进展'), '日志应包含补充进展记录');
+});
+
+test('协同处置室 - 非参与者提交消息 - 权限拦截', () => {
+  const room = Store.CollabRooms.getAll()[0];
+  const result = Store.CollabRooms.addProgress(
+    room.id, '观察员（赵六）不应能发消息', [], drObserver
+  );
+  assert(result.success === false && result.conflictType === 'permission',
+    '非参与者提交消息应被拦截为 permission 冲突');
+});
+
+test('协同处置室 - 添加待确认问题', () => {
+  const room = Store.CollabRooms.getAll()[0];
+  const result = Store.CollabRooms.addQuestion(
+    room.id,
+    '是否需要协调机房同事更换光模块？当前机房值班电话未接通',
+    drOperator
+  );
+
+  assert(result.success === true, '添加问题应成功');
+  const refreshed = Store.CollabRooms.getById(room.id);
+  assert(refreshed.pendingQuestions.length === 1, '待确认问题应有 1 条');
+  assert(refreshed.pendingQuestions[0].answered === false, '问题初始应为未答复');
+  assert(refreshed.messages.length === 2, 'messages 也应有 question 类型消息');
+  assert(refreshed.messages[1].type === 'question', '第二条消息类型应为 question');
+});
+
+test('协同处置室 - 班长答复待确认问题', () => {
+  const room = Store.CollabRooms.getById(Store.CollabRooms.getAll()[0].id);
+  const qId = room.pendingQuestions[0].id;
+
+  const result = Store.CollabRooms.answerQuestion(
+    room.id, qId,
+    '请立即联系运维二线王工（内线 8888）前往机房更换，我会同步邮件审批',
+    drAdmin
+  );
+
+  assert(result.success === true, '答复问题应成功');
+  const refreshed = Store.CollabRooms.getById(room.id);
+  const q = refreshed.pendingQuestions.find(p => p.id === qId);
+  assert(q.answered === true, '问题状态应为已答复');
+  assert(q.answererId === 'user_zhang', '答复人应为张三（班长）');
+  assert(refreshed.messages.length === 3, '消息数应为 3，含新增 answer 消息');
+  assert(refreshed.messages[2].type === 'answer', '最新消息类型应为 answer');
+});
+
+test('协同处置室 - 班长调整成员', () => {
+  const room = Store.CollabRooms.getById(Store.CollabRooms.getAll()[0].id);
+  const startCount = room.participants.length; // 应为 3
+
+  // 移除王五(user_wang)，添加赵六(user_zhao)
+  const result = Store.CollabRooms.update(
+    room.id,
+    { participantIds: ['user_zhang', 'user_li', 'user_zhao'] },
+    drAdmin, room.version
+  );
+
+  assert(result.success === true, '调整成员应成功');
+  const refreshed = Store.CollabRooms.getById(room.id);
+  const ids = refreshed.participants.map(p => p.userId);
+  assert(ids.includes('user_zhao'), '应新增赵六为成员');
+  assert(!ids.includes('user_wang'), '应移除王五');
+  assert(refreshed.participants.length === startCount, `成员数量应保持 ${startCount} 不变（加1减1）`);
+});
+
+test('协同处置室 - 值班员调整成员 - 权限拦截', () => {
+  const room = Store.CollabRooms.getById(Store.CollabRooms.getAll()[0].id);
+  const result = Store.CollabRooms.update(
+    room.id,
+    { participantIds: ['user_li'] },
+    drOperator, room.version
+  );
+  assert(result.success === false && result.conflictType === 'permission',
+    '值班员不应能调整成员');
+});
+
+test('协同处置室 - 乐观锁 - 版本冲突拦截', () => {
+  const room = Store.CollabRooms.getAll()[0];
+  const oldVersion = 1; // 远低于当前版本
+
+  // 模拟两个页面：A 页基于旧版本修改
+  const resultA = Store.CollabRooms.update(
+    room.id,
+    { title: 'A 页面的修改（基于旧版本）' },
+    drAdmin, oldVersion
+  );
+
+  assert(resultA.success === false, '基于旧版本的修改应失败');
+  assert(resultA.conflict === true, '应标记 conflict');
+  assert(resultA.conflictType === 'version', `冲突类型应为 version，实际 ${resultA.conflictType}`);
+  assert(resultA.latestRoom, '应返回最新版本的处置室对象供前端刷新');
+  assert(resultA.latestRoom.version === room.version, 'latestRoom 版本应等于当前最新版本');
+
+  const refreshed = Store.CollabRooms.getById(room.id);
+  assert(refreshed.title !== 'A 页面的修改（基于旧版本）', '标题不应被旧版本修改');
+});
+
+test('协同处置室 - 乐观锁 - 正确版本应正常更新', () => {
+  const room = Store.CollabRooms.getById(Store.CollabRooms.getAll()[0].id);
+  const oldVer = room.version;
+
+  const result = Store.CollabRooms.update(
+    room.id,
+    { title: '【已定位根因】核心交换机端口异常协同处置', target: '已定位根因，更换光模块后恢复' },
+    drAdmin, room.version
+  );
+
+  assert(result.success === true, `正确版本应更新成功，${result.error || ''}`);
+  assert(result.room.version === oldVer + 1, '版本号应 +1');
+  const refreshed = Store.CollabRooms.getById(room.id);
+  assert(refreshed.title.startsWith('【已定位根因】'), '标题应已更新');
+});
+
+test('协同处置室 - 班长关闭处置室', () => {
+  const room = Store.CollabRooms.getById(Store.CollabRooms.getAll()[0].id);
+  const openVer = room.version;
+
+  // close(id, operator, reason, baseVersion) —— 注意参数顺序
+  const result = Store.CollabRooms.close(
+    room.id,
+    drAdmin,
+    '已更换光模块，温度降至 42℃，端口连续 30 分钟稳定，业务恢复正常',
+    room.version
+  );
+
+  assert(result.success === true, `关闭应成功，错误:${result.error || ''}, conflictType:${result.conflictType || ''}`);
+  assert(result.room.status === 'closed', '状态应为 closed');
+  assert(result.room.version === openVer + 1, '版本应 +1');
+  assert(result.room.closeReason.length > 0, '关闭原因应已记录');
+  assert(result.room.closeTime, 'closeTime 应有值');
+
+  const refreshed = Store.CollabRooms.getById(room.id);
+  assert(refreshed.logs.some(l => l.action === '关闭处置室'), '日志应包含关闭记录');
+});
+
+test('协同处置室 - 已关闭后继续提交消息 - 拦截', () => {
+  const room = Store.CollabRooms.getAll()[0];
+  const result = Store.CollabRooms.addProgress(room.id, '关闭后不应还能发消息', [], drAdmin);
+  assert(result.success === false && result.conflictType === 'closed',
+    '已关闭处置室提交消息应返回 closed 冲突');
+});
+
+test('协同处置室 - 已关闭后重复拉起 - 应允许（因为已关闭的不应拦截）', () => {
+  // 之前是 active 时拦截，现在关闭了再次发起应该允许
+  const result = Store.CollabRooms.create({
+    sourceItemId: drItemId,
+    sourceItemTitle: '处置室测试事项：核心交换机告警',
+    title: '核心交换机再次异常（第二次拉起）',
+    level: 'high',
+    impactScope: '相同位置',
+    target: '新的目标',
+    deadline: new Date().toISOString().slice(0, 16),
+    participantIds: ['user_zhang']
+  }, drOperator);
+
+  assert(result.success === true, `已关闭后再次拉起应允许，错误: ${result.error || ''}`);
+  assert(result.room.id !== Store.CollabRooms.getAll()[0].id, '应为新的处置室，ID 不同');
+  assert(Store.CollabRooms.getAll().length === 2, '现在应有 2 个处置室');
+});
+
+test('协同处置室 - 重新开启（班长权限）', () => {
+  const firstRoom = Store.CollabRooms.getAll()[0];
+  assert(firstRoom.status === 'closed', '初始应为 closed');
+
+  const reopenResult = Store.CollabRooms.reopen(firstRoom.id, drAdmin);
+  assert(reopenResult.success === true, `重新开启应成功，${reopenResult.error || ''}`);
+  assert(reopenResult.room.status === 'active', '重新开启后状态应为 active');
+  assert(reopenResult.room.version > firstRoom.version, '版本号应提升');
+
+  const refreshed = Store.CollabRooms.getById(firstRoom.id);
+  assert(refreshed.logs.some(l => l.action === '重新开启处置室'), '日志应记录重新开启');
+});
+
+test('协同处置室 - 重新开启后应能再次提交消息', () => {
+  const room = Store.CollabRooms.getAll()[0];
+  const result = Store.CollabRooms.addProgress(room.id, '重新开启后提交进展：用户反馈仍偶发丢包', [], drOperator);
+  assert(result.success === true, '重新开启后应能正常发消息');
+});
+
+test('协同处置室 - 导出 JSON 摘要', () => {
+  const room = Store.CollabRooms.getAll()[0];
+  const result = Store.CollabRooms.exportJSON(room.id);
+  assert(result.success === true, 'JSON 导出应成功');
+
+  const j = result.data;
+  assert(j.id === room.id, 'ID 匹配');
+  assert(j.totalMessages > 0, '摘要应包含消息数统计 totalMessages');
+  assert(j.totalQuestions > 0, '摘要应包含问题数统计 totalQuestions');
+  assert(Array.isArray(j.messages) && j.messages.length > 0, '应包含 messages 数组');
+  assert(Array.isArray(j.pendingQuestions), '应包含 pendingQuestions 数组');
+  assert(Array.isArray(j.operationLogs) && j.operationLogs.length > 0, '应包含 operationLogs 数组');
+});
+
+test('协同处置室 - 导出 CSV 摘要', () => {
+  const room = Store.CollabRooms.getAll()[0];
+  const result = Store.CollabRooms.exportCSV(room.id);
+  assert(result.success === true, 'CSV 导出应成功');
+  assert(result.csv.startsWith('\ufeff'), 'CSV 应含 UTF-8 BOM 避免中文乱码');
+  assert(result.csv.includes('处置室 ID'), '应包含处置室 ID 字段表头');
+  assert(result.csv.includes(room.id), 'CSV 内容中应包含处置室 ID');
+  assert(result.csv.includes('处置室标题'), '应包含处置室标题表头');
+  assert(result.csv.includes('=== 消息/进展/问答流水 ==='), '应包含消息流水分区');
+  assert(result.csv.includes('=== 待确认问题清单 ==='), '应包含问题清单分区');
+  assert(result.csv.includes('=== 操作日志 ==='), '应包含操作日志分区');
+});
+
+test('协同处置室 - localStorage 持久化（刷新后恢复）', () => {
+  const beforeAll = Store.CollabRooms.getAll();
+  assert(beforeAll.length === 2, '当前应有 2 个处置室');
+
+  // 模拟刷新：重新读取 localStorage
+  const raw = localStorage.getItem('handover_collab_rooms');
+  assert(raw !== null, 'localStorage 中应有 collab_rooms');
+  const parsed = JSON.parse(raw);
+  assert(Array.isArray(parsed) && parsed.length === 2, '序列化后数据结构正确');
+
+  // 验证第一条（关闭重开的那个）
+  const firstSaved = parsed.find(r => r.id === beforeAll[0].id);
+  assert(firstSaved.status === 'active', '持久化后状态应为 active');
+  assert(firstSaved.messages.length === beforeAll[0].messages.length,
+    '持久化后消息数应与内存中一致');
+  assert(firstSaved.version === beforeAll[0].version,
+    '持久化后版本号应与内存中一致');
+});
+
+test('协同处置室 - 完整导出包含 collabRooms', () => {
+  const fullExport = Store.exportAllData();
+  assert('collabRooms' in fullExport, '完整导出应包含 collabRooms 字段');
+  assert(Array.isArray(fullExport.collabRooms), 'collabRooms 应为数组');
+  assert(fullExport.collabRooms.length === 2, `collabRooms 应为 2 条，实际 ${fullExport.collabRooms.length}`);
+});
+
+test('协同处置室 - 备份/恢复完整流程（导入含 collabRooms）', () => {
+  localStorage.clear();
+  Store.createSampleData();
+  assert(Store.CollabRooms.getAll().length === 0, '清空后处置室应为 0');
+
+  // 重新用 adminUser 导入刚才的 fullExport 需要它里面还有其他基础数据，
+  // 所以我们先创建一个处置室再导出然后恢复它
+  const r1 = Store.CollabRooms.create({
+    title: '备份测试处置室', level: 'low', impactScope: 't', target: 't',
+    deadline: new Date().toISOString().slice(0, 16), participantIds: ['user_zhang']
+  }, drAdmin);
+  assert(r1.success, '创建处置室成功');
+  const savedExport = Store.exportAllData();
+  const roomIdToKeep = r1.room.id;
+
+  // 再次清空
+  localStorage.clear();
+  Store.createSampleData();
+  assert(Store.CollabRooms.getAll().length === 0, '二次清空后处置室应为 0');
+
+  // 执行恢复
+  const admin = Store.Users.getById('user_zhang');
+  const importResult = Store.executeImport(savedExport, admin);
+  assert(importResult.success === true, `执行导入应成功，${importResult.error || ''}`);
+
+  const roomsAfter = Store.CollabRooms.getAll();
+  assert(roomsAfter.length === 1, `恢复后应存在 1 个处置室，实际 ${roomsAfter.length}`);
+  assert(roomsAfter[0].id === roomIdToKeep, 'ID 应匹配');
+  assert(roomsAfter[0].title === '备份测试处置室', '标题应匹配');
+});
+
+test('协同处置室 - 四种冲突类型齐全', () => {
+  localStorage.clear();
+  Store.createSampleData();
+  const admin = Store.Users.getById('user_zhang');
+  const op = Store.Users.getById('user_li');
+  const observer = Store.Users.getById('user_zhao'); // 观察员是赵六，不是王五
+  const item = Store.Items.create({
+    title: '冲突测试事项', level: 'low', content: '',
+    shiftId: 'shift_morning', assigneeId: 'user_li', assigneeName: '李四'
+  }, op);
+
+  // 1. permission（创建权限）
+  const r1 = Store.CollabRooms.create({ title: 'a', level: 'low', impactScope: 'x', target: 'x', deadline: '2025-01-01T00:00', participantIds: ['user_zhang'] }, observer);
+  assert(r1.conflictType === 'permission', `观察员创建应为 permission 冲突，实际 ${r1.conflictType}`);
+
+  // 2. duplicate_room（同一事项重复拉起）
+  // 注意：user_li（李四）是后续 addProgress 的操作者，必须加入参与人列表
+  const r2 = Store.CollabRooms.create({ sourceItemId: item.id, title: 'b', level: 'low', impactScope: 'x', target: 'x', deadline: '2025-01-01T00:00', participantIds: ['user_zhang', 'user_li'] }, op);
+  assert(r2.success, '第一个应创建成功');
+  const r3 = Store.CollabRooms.create({ sourceItemId: item.id, title: 'c', level: 'low', impactScope: 'x', target: 'x', deadline: '2025-01-01T00:00', participantIds: ['user_zhang'] }, op);
+  assert(r3.conflictType === 'duplicate_room', `重复拉起应为 duplicate_room 冲突，实际 ${r3.conflictType}`);
+
+  // 3. version（版本号）：先推高版本号
+  Store.CollabRooms.addProgress(r2.room.id, '推高版本号', [], op);
+  // 再用旧的版本号 1 做更新
+  const r5 = Store.CollabRooms.update(r2.room.id, { title: 'e' }, admin, /* baseVersion */ 1);
+  assert(r5.conflictType === 'version', `旧版本保存应为 version 冲突，实际 ${r5.conflictType}`);
+
+  // 4. closed（已关闭操作）
+  const roomBeforeClose = Store.CollabRooms.getById(r2.room.id);
+  // close(id, operator, reason, baseVersion) —— 注意参数顺序
+  Store.CollabRooms.close(r2.room.id, admin, '测试关闭', roomBeforeClose.version);
+  const r6 = Store.CollabRooms.addProgress(r2.room.id, '关闭后不能发', [], op);
+  assert(r6.conflictType === 'closed', `已 closed 编辑应为 closed 冲突，实际 ${r6.conflictType}`);
+
+  console.log('  ✓ 四种冲突类型（permission/duplicate_room/version/closed）全部正确返回');
+});
+
 console.log('\n=== 测试结果总结 ===');
 console.log(`通过: ${passed}`);
 console.log(`失败: ${failed}`);

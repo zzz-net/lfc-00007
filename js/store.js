@@ -12,7 +12,8 @@ const Store = (function() {
     REVIEW_CARDS: 'handover_review_cards',
     REVIEW_FILTERS: 'handover_review_filters',
     CHECKLIST_TEMPLATES: 'handover_checklist_templates',
-    CHECKLIST_RECORDS: 'handover_checklist_records'
+    CHECKLIST_RECORDS: 'handover_checklist_records',
+    COLLAB_ROOMS: 'handover_collab_rooms'
   };
 
   const CURRENT_DATA_VERSION = '1.1';
@@ -1214,6 +1215,545 @@ const Store = (function() {
     }
   };
 
+  const CollabRooms = {
+    LEVELS: {
+      urgent: { name: '紧急', color: 'urgent' },
+      high: { name: '高', color: 'high' },
+      medium: { name: '中', color: 'medium' },
+      low: { name: '低', color: 'low' }
+    },
+
+    getAll() {
+      return getFromStorage(STORAGE_KEYS.COLLAB_ROOMS, []);
+    },
+    saveAll(rooms) {
+      return saveToStorage(STORAGE_KEYS.COLLAB_ROOMS, rooms);
+    },
+    getById(id) {
+      return this.getAll().find(r => r.id === id) || null;
+    },
+    getActiveBySourceItemId(sourceItemId) {
+      return this.getAll().find(r => r.sourceItemId === sourceItemId && r.status === 'active') || null;
+    },
+    getByParticipant(userId) {
+      return this.getAll().filter(r =>
+        r.participants.some(p => p.userId === userId)
+      );
+    },
+    create(data, creator) {
+      if (!creator || !creator.id) {
+        return { success: false, error: '请先选择当前用户' };
+      }
+      const role = Roles.getById(creator.roleId);
+      if (!role || !role.canCreate) {
+        return {
+          success: false,
+          error: '当前用户无权限创建处置室',
+          conflict: true,
+          conflictType: 'permission'
+        };
+      }
+      if (data.sourceItemId) {
+        const existing = this.getActiveBySourceItemId(data.sourceItemId);
+        if (existing) {
+          return {
+            success: false,
+            error: '该事项已有关联的进行中处置室，请勿重复拉起',
+            conflict: true,
+            existingRoomId: existing.id,
+            existingRoom: existing,
+            conflictType: 'duplicate_room'
+          };
+        }
+      }
+      if (!data.title || !data.title.trim()) {
+        return { success: false, error: '请填写处置室标题' };
+      }
+      if (!data.level || !this.LEVELS[data.level]) {
+        return { success: false, error: '请选择事件级别' };
+      }
+      // 允许传入 participantIds（ID 数组）或 participants（对象数组）
+      if (data.participantIds && !data.participants) {
+        const allUsers = Users.getAll();
+        data.participants = data.participantIds
+          .map(uid => allUsers.find(u => u.id === uid))
+          .filter(Boolean)
+          .map(u => ({
+            userId: u.id,
+            name: u.name,
+            roleId: u.roleId,
+            roleName: (Roles.getById(u.roleId) || {}).name || ''
+          }));
+      }
+      if (!data.participants || data.participants.length === 0) {
+        return { success: false, error: '请至少选择一位参与人' };
+      }
+      const now = Date.now();
+      const room = {
+        id: generateId('room'),
+        sourceItemId: data.sourceItemId || '',
+        sourceItemTitle: data.sourceItemTitle || '',
+        title: data.title.trim(),
+        level: data.level,
+        impactScope: data.impactScope || '',
+        target: data.target || '',
+        deadline: data.deadline || '',
+        status: 'active',
+        participants: data.participants.map(p => ({
+          userId: p.userId,
+          name: p.name,
+          roleId: p.roleId,
+          roleName: p.roleName,
+          joinTime: now
+        })),
+        messages: [],
+        pendingQuestions: [],
+        logs: [{
+          id: generateId('log'),
+          action: '创建处置室',
+          detail: '创建处置室：' + data.title.trim() + '，事件级别：' + this.LEVELS[data.level].name + '，参与人：' + data.participants.map(p => p.name).join('、'),
+          operatorId: creator.id,
+          operatorName: creator.name,
+          time: now
+        }],
+        version: 1,
+        creatorId: creator.id,
+        creatorName: creator.name,
+        createTime: now,
+        updateTime: now,
+        closeTime: null,
+        closeReason: ''
+      };
+      const rooms = this.getAll();
+      rooms.push(room);
+      this.saveAll(rooms);
+      return { success: true, room };
+    },
+    _addLog(room, action, detail, operator) {
+      const now = Date.now();
+      room.logs.push({
+        id: generateId('log'),
+        action,
+        detail,
+        operatorId: operator.id,
+        operatorName: operator.name,
+        time: now
+      });
+    },
+    _isAdmin(user) {
+      if (!user || !user.roleId) return false;
+      const role = Roles.getById(user.roleId);
+      return role && (role.id === 'role_admin' || role.canManageConfig === true);
+    },
+    _isParticipant(room, user) {
+      if (!user || !user.id) return false;
+      return room.participants.some(p => p.userId === user.id);
+    },
+    canManageMembers(room, user) {
+      if (!room || room.status === 'closed') return false;
+      return this._isAdmin(user);
+    },
+    canClose(room, user) {
+      if (!room || room.status === 'closed') return false;
+      return this._isAdmin(user);
+    },
+    canAddMessage(room, user) {
+      if (!room || room.status === 'closed') return false;
+      return this._isParticipant(room, user);
+    },
+    canEditBasic(room, user) {
+      if (!room || room.status === 'closed') return false;
+      return this._isAdmin(user) || room.creatorId === user?.id;
+    },
+    update(id, data, operator, baseVersion) {
+      const rooms = this.getAll();
+      const idx = rooms.findIndex(r => r.id === id);
+      if (idx === -1) return { success: false, error: '处置室不存在' };
+      const room = rooms[idx];
+      if (room.status === 'closed') {
+        return {
+          success: false,
+          error: '处置室已关闭，无法修改',
+          conflict: true,
+          conflictType: 'closed'
+        };
+      }
+      if (baseVersion !== undefined && baseVersion !== room.version) {
+        return {
+          success: false,
+          error: '版本冲突，已有他人更新，请刷新后重试',
+          conflict: true,
+          conflictType: 'version',
+          latestVersion: room.version,
+          latestRoom: JSON.parse(JSON.stringify(room))
+        };
+      }
+      // 允许传入 participantIds（ID 数组）或 participants（对象数组）
+      if (data.participantIds && !data.participants) {
+        const allUsers = Users.getAll();
+        data.participants = data.participantIds
+          .map(uid => allUsers.find(u => u.id === uid))
+          .filter(Boolean)
+          .map(u => ({
+            userId: u.id,
+            name: u.name,
+            roleId: u.roleId,
+            roleName: (Roles.getById(u.roleId) || {}).name || ''
+          }));
+      }
+      if (data.participants !== undefined && !this.canManageMembers(room, operator)) {
+        return {
+          success: false,
+          error: '仅班长可调整参与人',
+          conflict: true,
+          conflictType: 'permission'
+        };
+      }
+      const hasBasicChanges = data.title !== undefined || data.level !== undefined
+        || data.impactScope !== undefined || data.target !== undefined
+        || data.deadline !== undefined;
+      if (hasBasicChanges && !this.canEditBasic(room, operator)) {
+        return {
+          success: false,
+          error: '仅班长或创建者可修改基本信息',
+          conflict: true,
+          conflictType: 'permission'
+        };
+      }
+      const changes = [];
+      if (data.title !== undefined && data.title !== room.title) {
+        changes.push('标题：' + room.title + ' → ' + data.title);
+        room.title = data.title;
+      }
+      if (data.level !== undefined && data.level !== room.level) {
+        changes.push('事件级别：' + this.LEVELS[room.level].name + ' → ' + this.LEVELS[data.level].name);
+        room.level = data.level;
+      }
+      if (data.impactScope !== undefined && data.impactScope !== room.impactScope) {
+        changes.push('影响范围已更新');
+        room.impactScope = data.impactScope;
+      }
+      if (data.target !== undefined && data.target !== room.target) {
+        changes.push('处置目标已更新');
+        room.target = data.target;
+      }
+      if (data.deadline !== undefined && data.deadline !== room.deadline) {
+        changes.push('截止时间：' + (room.deadline || '未设置') + ' → ' + (data.deadline || '未设置'));
+        room.deadline = data.deadline;
+      }
+      if (data.participants !== undefined) {
+        const newIds = data.participants.map(p => p.userId);
+        const now = Date.now();
+        const merged = [];
+        data.participants.forEach(p => {
+          const existing = room.participants.find(x => x.userId === p.userId);
+          merged.push(existing || { ...p, joinTime: now });
+        });
+        const added = data.participants.filter(p => !room.participants.some(x => x.userId === p.userId));
+        const removed = room.participants.filter(p => !newIds.includes(p.userId));
+        room.participants = merged;
+        const addedNames = added.map(a => a.name);
+        const removedNames = removed.map(r => r.name);
+        if (addedNames.length > 0 || removedNames.length > 0) {
+          let detail = '成员调整：';
+          if (addedNames.length > 0) detail += '添加：' + addedNames.join('、');
+          if (removedNames.length > 0) detail += (addedNames.length > 0 ? '；' : '') + '移除：' + removedNames.join('、');
+          changes.push(detail);
+        }
+      }
+      if (changes.length === 0) {
+        return { success: true, room };
+      }
+      room.version += 1;
+      room.updateTime = Date.now();
+      this._addLog(room, '修改处置室', changes.join('；'), operator);
+      rooms[idx] = room;
+      this.saveAll(rooms);
+      return { success: true, room };
+    },
+    addProgress(id, content, attachments, operator) {
+      const rooms = this.getAll();
+      const idx = rooms.findIndex(r => r.id === id);
+      if (idx === -1) return { success: false, error: '处置室不存在' };
+      const room = rooms[idx];
+      if (room.status === 'closed') {
+        return {
+          success: false, error: '处置室已关闭，无法补充进展', conflict: true, conflictType: 'closed'
+        };
+      }
+      if (!this._isParticipant(room, operator)) {
+        return {
+          success: false, error: '仅参与人可在处置室内补充进展', conflict: true, conflictType: 'permission'
+        };
+      }
+      if (!content || !content.trim()) {
+        return { success: false, error: '请输入进展内容' };
+      }
+      const now = Date.now();
+      const message = {
+        id: generateId('msg'),
+        type: 'progress',
+        content: content.trim(),
+        attachments: attachments || [],
+        operatorId: operator.id,
+        operatorName: operator.name,
+        time: now
+      };
+      room.messages.push(message);
+      room.version += 1;
+      room.updateTime = now;
+      const summary = content.trim().substring(0, 50) + (content.length > 50 ? '...' : '');
+      this._addLog(room, '补充进展', operator.name + ' 补充进展：' + summary, operator);
+      rooms[idx] = room;
+      this.saveAll(rooms);
+      return { success: true, room, message };
+    },
+    addQuestion(id, content, operator) {
+      const rooms = this.getAll();
+      const idx = rooms.findIndex(r => r.id === id);
+      if (idx === -1) return { success: false, error: '处置室不存在' };
+      const room = rooms[idx];
+      if (room.status === 'closed') {
+        return { success: false, error: '处置室已关闭，无法提出问题', conflict: true, conflictType: 'closed' };
+      }
+      if (!this._isParticipant(room, operator)) {
+        return { success: false, error: '仅参与人可提出待确认问题', conflict: true, conflictType: 'permission' };
+      }
+      if (!content || !content.trim()) {
+        return { success: false, error: '请输入问题内容' };
+      }
+      const now = Date.now();
+      const question = {
+        id: generateId('q'),
+        content: content.trim(),
+        answered: false,
+        answer: '',
+        answererId: '',
+        answererName: '',
+        answerTime: null,
+        operatorId: operator.id,
+        operatorName: operator.name,
+        time: now
+      };
+      room.pendingQuestions.push(question);
+      const message = {
+        id: generateId('msg'),
+        type: 'question',
+        content: content.trim(),
+        questionId: question.id,
+        attachments: [],
+        operatorId: operator.id,
+        operatorName: operator.name,
+        time: now
+      };
+      room.messages.push(message);
+      room.version += 1;
+      room.updateTime = now;
+      const summary = content.trim().substring(0, 50) + (content.length > 50 ? '...' : '');
+      this._addLog(room, '提出待确认问题', operator.name + ' 提出：' + summary, operator);
+      rooms[idx] = room;
+      this.saveAll(rooms);
+      return { success: true, room, question };
+    },
+    answerQuestion(id, questionId, answer, operator) {
+      const rooms = this.getAll();
+      const idx = rooms.findIndex(r => r.id === id);
+      if (idx === -1) return { success: false, error: '处置室不存在' };
+      const room = rooms[idx];
+      if (room.status === 'closed') {
+        return { success: false, error: '处置室已关闭', conflict: true, conflictType: 'closed' };
+      }
+      if (!this._isAdmin(operator) && room.creatorId !== operator.id) {
+        return { success: false, error: '仅班长或处置室创建者可答复问题', conflict: true, conflictType: 'permission' };
+      }
+      const qIdx = room.pendingQuestions.findIndex(q => q.id === questionId);
+      if (qIdx === -1) return { success: false, error: '问题不存在' };
+      if (!answer || !answer.trim()) {
+        return { success: false, error: '请输入答复内容' };
+      }
+      const now = Date.now();
+      room.pendingQuestions[qIdx].answered = true;
+      room.pendingQuestions[qIdx].answer = answer.trim();
+      room.pendingQuestions[qIdx].answererId = operator.id;
+      room.pendingQuestions[qIdx].answererName = operator.name;
+      room.pendingQuestions[qIdx].answerTime = now;
+      const message = {
+        id: generateId('msg'),
+        type: 'answer',
+        content: answer.trim(),
+        questionId: questionId,
+        attachments: [],
+        operatorId: operator.id,
+        operatorName: operator.name,
+        time: now
+      };
+      room.messages.push(message);
+      room.version += 1;
+      room.updateTime = now;
+      const qSummary = room.pendingQuestions[qIdx].content.substring(0, 30);
+      const aSummary = answer.trim().substring(0, 30);
+      this._addLog(room, '答复问题', operator.name + ' 答复问题：' + qSummary + ' - ' + aSummary, operator);
+      rooms[idx] = room;
+      this.saveAll(rooms);
+      return { success: true, room };
+    },
+    close(id, operator, reason, baseVersion) {
+      const rooms = this.getAll();
+      const idx = rooms.findIndex(r => r.id === id);
+      if (idx === -1) return { success: false, error: '处置室不存在' };
+      const room = rooms[idx];
+      if (room.status === 'closed') {
+        return { success: false, error: '处置室已关闭', conflict: true, conflictType: 'closed' };
+      }
+      if (baseVersion !== undefined && baseVersion !== room.version) {
+        return {
+          success: false,
+          error: '版本冲突，已有他人更新，请刷新后重试',
+          conflict: true,
+          conflictType: 'version',
+          latestVersion: room.version,
+          latestRoom: JSON.parse(JSON.stringify(room))
+        };
+      }
+      if (!this.canClose(room, operator)) {
+        return { success: false, error: '仅班长可关闭处置室', conflict: true, conflictType: 'permission' };
+      }
+      const now = Date.now();
+      room.status = 'closed';
+      room.closeTime = now;
+      room.closeReason = reason || '';
+      room.version += 1;
+      room.updateTime = now;
+      this._addLog(room, '关闭处置室', '关闭原因：' + (reason || '未填写'), operator);
+      rooms[idx] = room;
+      this.saveAll(rooms);
+      return { success: true, room };
+    },
+    reopen(id, operator, baseVersion) {
+      const rooms = this.getAll();
+      const idx = rooms.findIndex(r => r.id === id);
+      if (idx === -1) return { success: false, error: '处置室不存在' };
+      const room = rooms[idx];
+      if (room.status !== 'closed') {
+        return { success: false, error: '处置室未关闭' };
+      }
+      if (!this._isAdmin(operator)) {
+        return { success: false, error: '仅班长可重新开启处置室', conflict: true, conflictType: 'permission' };
+      }
+      const now = Date.now();
+      room.status = 'active';
+      room.closeTime = null;
+      room.closeReason = '';
+      room.version += 1;
+      room.updateTime = now;
+      this._addLog(room, '重新开启处置室', '', operator);
+      rooms[idx] = room;
+      this.saveAll(rooms);
+      return { success: true, room };
+    },
+    exportJSON(id) {
+      const room = this.getById(id);
+      if (!room) return { success: false, error: '处置室不存在' };
+      const levelName = this.LEVELS[room.level]?.name || room.level;
+      const statusName = room.status === 'closed' ? '已关闭' : '进行中';
+      const summary = {
+        id: room.id,
+        title: room.title,
+        level: levelName,
+        status: statusName,
+        sourceItemTitle: room.sourceItemTitle,
+        impactScope: room.impactScope,
+        target: room.target,
+        deadline: room.deadline,
+        participants: room.participants.map(p => ({
+          name: p.name,
+          role: p.roleName,
+          joinTime: new Date(p.joinTime).toISOString()
+        })),
+        creator: room.creatorName,
+        createTime: new Date(room.createTime).toISOString(),
+        updateTime: new Date(room.updateTime).toISOString(),
+        closeTime: room.closeTime ? new Date(room.closeTime).toISOString() : null,
+        closeReason: room.closeReason,
+        messages: room.messages.map(m => ({
+          type: m.type === 'progress' ? '进展' : m.type === 'question' ? '待确认问题' : m.type === 'answer' ? '问题答复' : m.type,
+          content: m.content,
+          operator: m.operatorName,
+          time: new Date(m.time).toISOString(),
+          attachments: m.attachments || []
+        })),
+        pendingQuestions: room.pendingQuestions.map(q => ({
+          content: q.content,
+          answered: q.answered,
+          answer: q.answer,
+          answerer: q.answererName,
+          answerTime: q.answerTime ? new Date(q.answerTime).toISOString() : null,
+          operator: q.operatorName,
+          time: new Date(q.time).toISOString()
+        })),
+        totalMessages: room.messages.length,
+        totalQuestions: room.pendingQuestions.length,
+        unansweredQuestions: room.pendingQuestions.filter(q => !q.answered).length,
+        operationLogs: room.logs.map(l => ({
+          action: l.action,
+          detail: l.detail,
+          operator: l.operatorName,
+          time: new Date(l.time).toISOString()
+        }))
+      };
+      return { success: true, data: summary };
+    },
+    exportCSV(id) {
+      const result = this.exportJSON(id);
+      if (!result.success) return result;
+      const s = result.data;
+      const lines = [];
+      lines.push(['字段', '内容'].map(x => '"' + String(x).replace(/"/g, '""') + '"').join(','));
+      const pushRow = (k, v) => lines.push([k, v].map(x => '"' + String(x || '').replace(/"/g, '""') + '"').join(','));
+      pushRow('处置室 ID', s.id);
+      pushRow('处置室标题', s.title);
+      pushRow('事件级别', s.level);
+      pushRow('状态', s.status);
+      pushRow('关联事项', s.sourceItemTitle);
+      pushRow('影响范围', s.impactScope);
+      pushRow('处置目标', s.target);
+      pushRow('截止时间', s.deadline);
+      pushRow('参与人', s.participants.map(p => p.name + '(' + p.role + ')').join('；'));
+      pushRow('创建人', s.creator);
+      pushRow('创建时间', s.createTime);
+      pushRow('更新时间', s.updateTime);
+      pushRow('关闭时间', s.closeTime || '');
+      pushRow('关闭原因', s.closeReason || '');
+      pushRow('消息总数', s.totalMessages);
+      pushRow('待确认问题数', s.totalQuestions);
+      pushRow('未答复问题数', s.unansweredQuestions);
+      lines.push('');
+      lines.push('=== 消息/进展/问答流水 ===');
+      lines.push(['时间', '类型', '操作人', '内容', '附件数'].map(x => '"' + x + '"').join(','));
+      s.messages.forEach(m => {
+        lines.push([m.time, m.type, m.operator, m.content, (m.attachments || []).length]
+          .map(x => '"' + String(x || '').replace(/"/g, '""') + '"').join(','));
+      });
+      lines.push('');
+      lines.push('=== 待确认问题清单 ===');
+      lines.push(['时间', '提问人', '问题', '已答复', '答复人', '答复内容', '答复时间'].map(x => '"' + x + '"').join(','));
+      s.pendingQuestions.forEach(q => {
+        lines.push([q.time, q.operator, q.content, q.answered ? '是' : '否',
+          q.answerer || '', q.answer || '', q.answerTime || '']
+          .map(x => '"' + String(x || '').replace(/"/g, '""') + '"').join(','));
+      });
+      lines.push('');
+      lines.push('=== 操作日志 ===');
+      lines.push(['时间', '操作人', '动作', '详情'].map(x => '"' + x + '"').join(','));
+      s.operationLogs.forEach(l => {
+        lines.push([l.time, l.operator, l.action, l.detail]
+          .map(x => '"' + String(x || '').replace(/"/g, '""') + '"').join(','));
+      });
+      const BOM = '\uFEFF';
+      return { success: true, csv: BOM + lines.join('\n'), filename: s.title };
+    }
+  };
+
   function createSampleData() {
     const sampleRoles = [
       { id: 'role_admin', name: '班长', canCreate: true, canProcess: true, canClose: true, canConfirm: true, canManageConfig: true },
@@ -1334,6 +1874,7 @@ const Store = (function() {
       recoveryLogs: RecoveryLogs.getAll(),
       reviewCards: ReviewCards.getAll(),
       reviewFilters: ReviewFilters.get(),
+      collabRooms: CollabRooms.getAll(),
       exportTime: new Date().toISOString(),
       version: CURRENT_DATA_VERSION
     };
@@ -1382,7 +1923,7 @@ const Store = (function() {
   function validateImportStructure(data) {
     const errors = [];
     const requiredFields = ['version', 'exportTime'];
-    const arrayFields = ['shifts', 'roles', 'users', 'checkItems', 'items', 'handoverRecords', 'reviewCards'];
+    const arrayFields = ['shifts', 'roles', 'users', 'checkItems', 'items', 'handoverRecords', 'reviewCards', 'collabRooms'];
 
     if (typeof data !== 'object' || data === null) {
       return { valid: false, errors: ['数据格式错误，应为 JSON 对象'] };
@@ -1563,6 +2104,7 @@ const Store = (function() {
       handoverRecords: importData.handoverRecords ? importData.handoverRecords.length : 0,
       recoveryLogs: importData.recoveryLogs ? importData.recoveryLogs.length : 0,
       reviewCards: importData.reviewCards ? importData.reviewCards.length : 0,
+      collabRooms: importData.collabRooms ? importData.collabRooms.length : 0,
       reviewFilters: importData.reviewFilters ? migrateReviewFilters(importData.reviewFilters) : null,
       hasReviewFilters: !!importData.reviewFilters,
       exportTime: importData.exportTime,
@@ -1580,13 +2122,14 @@ const Store = (function() {
       handoverRecords: HandoverRecords.getAll().length,
       recoveryLogs: RecoveryLogs.getAll().length,
       reviewCards: ReviewCards.getAll().length,
+      collabRooms: CollabRooms.getAll().length,
       reviewFilters: ReviewFilters.get(),
       version: CURRENT_DATA_VERSION
     };
   }
 
   function calculateDifferences(importSummary, currentSummary) {
-    const fields = ['shifts', 'roles', 'users', 'checkItems', 'items', 'handoverRecords', 'recoveryLogs', 'reviewCards'];
+    const fields = ['shifts', 'roles', 'users', 'checkItems', 'items', 'handoverRecords', 'recoveryLogs', 'reviewCards', 'collabRooms'];
     const differences = {};
     let totalChanges = 0;
 
@@ -1692,6 +2235,7 @@ const Store = (function() {
       if (data.handoverRecords) HandoverRecords.saveAll(data.handoverRecords);
       if (data.recoveryLogs) RecoveryLogs.saveAll(data.recoveryLogs);
       if (data.reviewCards) ReviewCards.saveAll(data.reviewCards);
+      if (data.collabRooms) CollabRooms.saveAll(data.collabRooms);
 
       let reviewFiltersRestoreInfo = {
         restored: false,
@@ -1754,6 +2298,7 @@ const Store = (function() {
     ReviewFilters,
     ChecklistTemplates,
     ChecklistRecords,
+    CollabRooms,
     createSampleData,
     exportAllData,
     validateImportStructure,

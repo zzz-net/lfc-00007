@@ -2189,3 +2189,575 @@ body {
   background: #f5f5f5;
 }
 
+/* ========== 协同处置室 ========== */
+.dispatch-view {
+  padding: 20px;
+}
+.dispatch-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-end;
+  margin-bottom: 20px;
+}
+.dispatch-header h2 { font-size: 20px; color: #333; margin: 0; }
+.dispatch-actions {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+}
+.dispatch-count {
+  font-size: 13px;
+  color: #666;
+}
+.dispatch-filter-bar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 16px;
+  align-items: center;
+  padding: 14px 16px;
+  background: #fafafa;
+  border: 1px solid #eee;
+  border-radius: 8px;
+  margin-bottom: 20px;
+}
+.filter-group {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.filter-group label {
+  font-size: 13px;
+  color: #555;
+  font-weight: 500;
+}
+
+.dispatch-list {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(360px, 1fr));
+  gap: 16px;
+}
+.dispatch-card {
+  position: relative;
+  background: #fff;
+  border: 1px solid #e8e8e8;
+  border-radius: 8px;
+  overflow: hidden;
+  display: flex;
+  cursor: pointer;
+  transition: all 0.2s;
+  box-shadow: 0 1px 2px rgba(0,0,0,0.04);
+}
+.dispatch-card:hover {
+  box-shadow: 0 4px 12px rgba(0,0,0,0.08);
+  transform: translateY(-2px);
+  border-color: #91caff;
+}
+.dispatch-card-left-bar {
+  width: 5px;
+  flex-shrink: 0;
+  background: #91caff;
+}
+.level-bar-urgent { background: #ff4d4f; }
+.level-bar-high   { background: #ff7a45; }
+.level-bar-medium { background: #faad14; }
+.level-bar-low    { background: #52c41a; }
+
+.dispatch-card-main {
+  flex: 1;
+  padding: 14px 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  min-width: 0;
+}
+.dispatch-card-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 10px;
+}
+.dispatch-card-header-left {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.dispatch-status-badge {
+  padding: 2px 10px;
+  border-radius: 10px;
+  font-size: 12px;
+  font-weight: 500;
+}
+.status-active { background: #e6fffb; color: #08979c; border: 1px solid #87e8de; }
+.status-closed { background: #f5f5f5; color: #8c8c8c; border: 1px solid #d9d9d9; }
+.dispatch-level-badge {
+  padding: 2px 10px;
+  border-radius: 10px;
+  font-size: 12px;
+  font-weight: 600;
+}
+.level-badge-urgent { background: #fff1f0; color: #cf1322; border: 1px solid #ffa39e; }
+.level-badge-high   { background: #fff7e6; color: #d46b08; border: 1px solid #ffd591; }
+.level-badge-medium { background: #fcffe6; color: #7cb305; border: 1px solid #eaff8f; }
+.level-badge-low    { background: #f6ffed; color: #389e0d; border: 1px solid #b7eb8f; }
+.dispatch-source {
+  font-size: 12px;
+  color: #888;
+  background: #f5f5f5;
+  padding: 2px 8px;
+  border-radius: 4px;
+  max-width: 200px;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+.dispatch-version {
+  font-size: 12px;
+  color: #bbb;
+  font-family: monospace;
+}
+.dispatch-card-title {
+  font-size: 15px;
+  font-weight: 600;
+  color: #222;
+  line-height: 1.4;
+}
+.dispatch-card-target {
+  font-size: 13px;
+  color: #555;
+  padding: 6px 10px;
+  background: #f0f5ff;
+  border-left: 3px solid #597ef7;
+  border-radius: 0 4px 4px 0;
+  line-height: 1.5;
+}
+.dispatch-card-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px 14px;
+  font-size: 12px;
+  color: #666;
+}
+.dispatch-card-meta .overdue-text { color: #ff4d4f; font-weight: 500; }
+.dispatch-card-footer {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding-top: 8px;
+  border-top: 1px dashed #f0f0f0;
+}
+.dispatch-participants {
+  display: flex;
+  gap: 4px;
+  align-items: center;
+  flex-wrap: wrap;
+}
+.participant-chip {
+  display: inline-block;
+  width: 24px;
+  height: 24px;
+  line-height: 24px;
+  text-align: center;
+  border-radius: 50%;
+  background: #1677ff;
+  color: #fff;
+  font-size: 11px;
+  font-weight: 500;
+  border: 2px solid #fff;
+  box-shadow: 0 0 0 1px #e8e8e8;
+}
+.participant-more {
+  font-size: 12px;
+  color: #888;
+  margin-left: 4px;
+}
+.dispatch-time {
+  font-size: 12px;
+  color: #999;
+}
+
+.overdue-text { color: #ff4d4f; }
+
+/* ========== 处置室详情弹窗 ========== */
+.modal-extra-large {
+  max-width: 1200px;
+  width: calc(100vw - 60px);
+  max-height: calc(100vh - 60px);
+  display: flex;
+  flex-direction: column;
+}
+.collab-detail-body {
+  display: grid;
+  grid-template-columns: 1fr 320px;
+  gap: 20px;
+  padding: 0 !important;
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
+}
+.modal-extra-large .modal-body {
+  padding: 0;
+}
+.collab-detail-main,
+.collab-detail-sidebar {
+  padding: 20px;
+  overflow-y: auto;
+}
+.collab-detail-main {
+  border-right: 1px solid #f0f0f0;
+  min-width: 0;
+}
+@media (max-width: 900px) {
+  .collab-detail-body { grid-template-columns: 1fr; }
+  .collab-detail-main { border-right: none; border-bottom: 1px solid #f0f0f0; }
+}
+
+.detail-section { margin-bottom: 24px; }
+.detail-section h4 {
+  font-size: 14px;
+  color: #333;
+  margin: 0 0 12px 0;
+  padding-bottom: 8px;
+  border-bottom: 1px solid #f0f0f0;
+}
+.section-title-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+.detail-info-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+  gap: 10px 16px;
+  margin-bottom: 14px;
+}
+.detail-info-item {
+  font-size: 13px;
+  line-height: 1.6;
+}
+.detail-label { color: #888; }
+.detail-value { color: #333; font-weight: 500; }
+.detail-block { margin-top: 10px; }
+.detail-block-label {
+  font-size: 12px;
+  color: #888;
+  margin-bottom: 4px;
+  font-weight: 500;
+}
+.detail-block-content {
+  padding: 10px 12px;
+  background: #fafafa;
+  border-radius: 6px;
+  font-size: 13px;
+  color: #444;
+  line-height: 1.6;
+  white-space: pre-wrap;
+}
+.dispatch-version-detail {
+  font-size: 12px;
+  color: #aaa;
+  padding: 2px 8px;
+  background: #fafafa;
+  border-radius: 4px;
+  font-family: monospace;
+}
+
+.participants-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.participant-item {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 8px 12px;
+  background: #fafafa;
+  border-radius: 6px;
+}
+.participant-avatar {
+  width: 36px;
+  height: 36px;
+  border-radius: 50%;
+  background: #1677ff;
+  color: #fff;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-weight: 600;
+}
+.participant-info { flex: 1; min-width: 0; }
+.participant-name {
+  font-size: 14px;
+  font-weight: 500;
+  color: #222;
+}
+.participant-role {
+  font-size: 12px;
+  color: #888;
+  margin-top: 2px;
+}
+
+.member-edit-area {
+  padding: 12px;
+  background: #fffbe6;
+  border: 1px dashed #ffe58f;
+  border-radius: 6px;
+}
+.member-edit-actions {
+  margin-top: 10px;
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+.participant-checkboxes {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+  gap: 8px 12px;
+  padding: 8px 4px;
+}
+.checkbox-item {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+  padding: 6px 8px;
+  border-radius: 4px;
+  cursor: pointer;
+  user-select: none;
+}
+.checkbox-item:hover { background: #f5f5f5; }
+.checkbox-item.disabled { opacity: 0.5; cursor: not-allowed; }
+.basic-edit-form {
+  padding: 12px;
+  background: #e6f4ff;
+  border: 1px dashed #91caff;
+  border-radius: 6px;
+}
+.input-actions-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-top: 10px;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+/* ========== 待确认问题 ========== */
+.question-item {
+  padding: 12px 14px;
+  background: #fffbe6;
+  border: 1px solid #ffe58f;
+  border-radius: 6px;
+  margin-bottom: 10px;
+}
+.question-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 8px;
+}
+.question-status-badge {
+  padding: 2px 8px;
+  border-radius: 4px;
+  font-size: 12px;
+  font-weight: 500;
+}
+.status-pending { background: #fff1f0; color: #cf1322; }
+.status-done { background: #f6ffed; color: #389e0d; }
+.question-meta { font-size: 12px; color: #888; }
+.question-content {
+  font-size: 13px;
+  color: #444;
+  line-height: 1.6;
+  font-weight: 500;
+  margin-bottom: 8px;
+}
+.question-answer {
+  padding: 10px 12px;
+  background: #f6ffed;
+  border-left: 3px solid #52c41a;
+  border-radius: 0 4px 4px 0;
+  font-size: 13px;
+  color: #333;
+  line-height: 1.6;
+}
+.answer-form { margin-top: 10px; display: flex; gap: 8px; align-items: flex-start; }
+.answer-form .input-textarea { flex: 1; }
+
+/* ========== 消息流 ========== */
+.messages-flow { display: flex; flex-direction: column; gap: 14px; }
+.message-item {
+  display: flex;
+  gap: 10px;
+  align-items: flex-start;
+}
+.message-avatar {
+  width: 36px;
+  height: 36px;
+  border-radius: 50%;
+  background: #1677ff;
+  color: #fff;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-weight: 600;
+  flex-shrink: 0;
+}
+.message-type-progress .message-avatar { background: #52c41a; }
+.message-type-question .message-avatar { background: #faad14; }
+.message-type-answer   .message-avatar { background: #13c2c2; }
+
+.message-body {
+  flex: 1;
+  min-width: 0;
+  background: #fafafa;
+  border-radius: 8px;
+  padding: 10px 14px;
+}
+.message-header {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin-bottom: 6px;
+}
+.message-sender { font-weight: 600; color: #222; font-size: 13px; }
+.message-type-tag {
+  font-size: 11px;
+  padding: 1px 8px;
+  border-radius: 4px;
+  background: #e6f4ff;
+  color: #0958d9;
+}
+.message-time { font-size: 11px; color: #999; margin-left: auto; }
+.message-content {
+  font-size: 13px;
+  color: #333;
+  line-height: 1.6;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.message-attachments {
+  margin-top: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.attachment-item {
+  padding: 8px 10px;
+  background: #fff;
+  border: 1px solid #e8e8e8;
+  border-radius: 4px;
+  font-size: 12px;
+  color: #333;
+}
+.attachment-preview {
+  margin-top: 4px;
+  padding: 6px 8px;
+  background: #fafafa;
+  border-radius: 4px;
+  font-family: monospace;
+  font-size: 11px;
+  max-height: 80px;
+  overflow-y: auto;
+  color: #555;
+  white-space: pre-wrap;
+}
+.attachment-item-inline {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 10px;
+  background: #e6f4ff;
+  border-radius: 4px;
+  font-size: 12px;
+}
+.btn-link-remove {
+  background: none;
+  border: none;
+  color: #ff4d4f;
+  cursor: pointer;
+  font-size: 12px;
+  padding: 0 2px;
+}
+.btn-link-remove:hover { text-decoration: underline; }
+
+/* ========== 输入区 ========== */
+.message-input-area {
+  margin-top: 16px;
+  padding: 14px;
+  background: #f5f7fa;
+  border-radius: 8px;
+  border: 1px solid #e8e8e8;
+}
+.message-tabs {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+.progress-input, .question-input {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.attachment-upload-area {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.empty-small {
+  padding: 16px;
+  text-align: center;
+  background: #fafafa;
+  border-radius: 6px;
+  font-size: 13px;
+  color: #888;
+}
+
+/* ========== 操作日志时间线 ========== */
+.logs-timeline {
+  display: flex;
+  flex-direction: column;
+  position: relative;
+  padding-left: 18px;
+}
+.logs-timeline::before {
+  content: '';
+  position: absolute;
+  left: 6px;
+  top: 6px;
+  bottom: 6px;
+  width: 2px;
+  background: #f0f0f0;
+}
+.log-item {
+  position: relative;
+  padding: 8px 0 14px 0;
+}
+.log-dot {
+  position: absolute;
+  left: -18px;
+  top: 12px;
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: #1677ff;
+  border: 2px solid #fff;
+  box-shadow: 0 0 0 1px #91caff;
+}
+.log-content { font-size: 12px; }
+.log-action {
+  font-weight: 600;
+  color: #333;
+  margin-bottom: 2px;
+}
+.log-detail {
+  color: #555;
+  line-height: 1.5;
+  margin-bottom: 2px;
+}
+.log-meta { color: #999; font-size: 11px; }
+.text-muted { color: #999; }
+.text-success { color: #389e0d; }
+

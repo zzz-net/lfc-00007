@@ -28,6 +28,7 @@
         <button @click="activeTab = 'config'" class="btn btn-outline">⚙️ 配置</button>
         <button @click="activeTab = 'history'" class="btn btn-outline">📜 历史记录</button>
         <button @click="activeTab = 'review'" class="btn btn-outline">🔍 交接复盘</button>
+        <button @click="activeTab = 'dispatch_room'" class="btn btn-outline">🚨 协同处置室</button>
         <button @click="activeTab = 'backup'" class="btn btn-outline">💾 备份恢复</button>
         <button @click="activeTab = 'checklist'" class="btn btn-outline">✅ 班前检查</button>
         <button @click="showExportExceptionModal = true" class="btn btn-outline">📦 异常交接包</button>
@@ -465,6 +466,96 @@
         </div>
       </div>
 
+      <!-- 协同处置室 -->
+      <div v-if="activeTab === 'dispatch_room'" class="dispatch-view">
+        <div class="dispatch-header">
+          <h2>🚨 临时协同处置室</h2>
+          <div class="dispatch-actions">
+            <div class="dispatch-count">共 {{ collabRooms.length }} 个处置室，当前显示 {{ filteredCollabRooms.length }} 个</div>
+            <button @click="openCreateCollabRoom()" class="btn btn-primary">+ 新建处置室</button>
+          </div>
+        </div>
+        <div class="dispatch-filter-bar">
+          <div class="filter-group">
+            <label>状态：</label>
+            <select v-model="dispatchFilter.status" class="input-select">
+              <option value="">全部</option>
+              <option value="active">进行中</option>
+              <option value="closed">已关闭</option>
+            </select>
+          </div>
+          <div class="filter-group">
+            <label>级别：</label>
+            <select v-model="dispatchFilter.level" class="input-select">
+              <option value="">全部</option>
+              <option value="urgent">紧急</option>
+              <option value="high">高</option>
+              <option value="medium">中</option>
+              <option value="low">低</option>
+            </select>
+          </div>
+          <div class="filter-group">
+            <label>参与人：</label>
+            <select v-model="dispatchFilter.participantId" class="input-select">
+              <option value="">全部</option>
+              <option v-for="user in users" :key="user.id" :value="user.id">{{ user.name }}</option>
+            </select>
+          </div>
+          <button @click="resetDispatchFilter" class="btn btn-outline btn-sm">重置筛选</button>
+        </div>
+        <div v-if="collabRooms.length === 0" class="empty-state">
+          暂无处置室。可从看板事项一键拉起处置室，或点击上方「新建处置室」直接创建。
+        </div>
+        <div v-else-if="filteredCollabRooms.length === 0" class="empty-state">
+          当前筛选条件下没有匹配的处置室。
+        </div>
+        <div v-else class="dispatch-list">
+          <div v-for="room in filteredCollabRooms" :key="room.id"
+               class="dispatch-card" :class="'dispatch-level-' + room.level"
+               @click="openCollabRoomDetail(room)">
+            <div class="dispatch-card-left-bar" :class="'level-bar-' + room.level"></div>
+            <div class="dispatch-card-main">
+              <div class="dispatch-card-header">
+                <div class="dispatch-card-header-left">
+                  <span class="dispatch-status-badge" :class="room.status === 'closed' ? 'status-closed' : 'status-active'">
+                    {{ room.status === 'closed' ? '已关闭' : '进行中' }}
+                  </span>
+                  <span class="dispatch-level-badge" :class="'level-badge-' + room.level">
+                    {{ getDispatchLevelName(room.level) }}
+                  </span>
+                  <span v-if="room.sourceItemTitle" class="dispatch-source">📋 关联：{{ room.sourceItemTitle }}</span>
+                </div>
+                <span class="dispatch-version">v{{ room.version }}</span>
+              </div>
+              <div class="dispatch-card-title">{{ room.title }}</div>
+              <div v-if="room.target" class="dispatch-card-target">🎯 {{ room.target }}</div>
+              <div class="dispatch-card-meta">
+                <span v-if="room.deadline" :class="{ 'overdue-text': isDispatchOverdue(room) }">
+                  ⏰ 截止：{{ room.deadline }}{{ isDispatchOverdue(room) ? '（已逾期）' : '' }}
+                </span>
+                <span>👥 {{ room.participants.length }} 人参与</span>
+                <span>💬 {{ room.messages.length }} 条消息</span>
+                <span v-if="room.pendingQuestions && room.pendingQuestions.length > 0">
+                  ❓ {{ room.pendingQuestions.filter(q=>!q.answered).length }} 个待确认
+                </span>
+              </div>
+              <div class="dispatch-card-footer">
+                <span class="dispatch-participants">
+                  <span v-for="(p, i) in room.participants.slice(0, 4)" :key="p.userId" class="participant-chip"
+                        :title="p.name + ' - ' + p.roleName">
+                    {{ p.name }}
+                  </span>
+                  <span v-if="room.participants.length > 4" class="participant-more">
+                    +{{ room.participants.length - 4 }}
+                  </span>
+                </span>
+                <span class="dispatch-time">{{ formatTime(room.updateTime) }}</span>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
       <!-- 备份与恢复中心 -->
       <div v-if="activeTab === 'backup'" class="backup-view">
         <div class="backup-header">
@@ -516,6 +607,10 @@
                 <div class="summary-item">
                   <span class="summary-label">复盘卡：</span>
                   <span class="summary-value">{{ currentSummary.reviewCards }}</span>
+                </div>
+                <div class="summary-item">
+                  <span class="summary-label">处置室：</span>
+                  <span class="summary-value">{{ currentSummary.collabRooms || 0 }}</span>
                 </div>
               </div>
               <button @click="exportAllData" class="btn btn-primary btn-large">📥 导出完整数据包</button>
@@ -610,6 +705,7 @@
                         <div>事项</div><div>{{ log.beforeSummary.items }}</div><div>{{ log.afterSummary.items }}</div>
                         <div>交接记录</div><div>{{ log.beforeSummary.handoverRecords }}</div><div>{{ log.afterSummary.handoverRecords }}</div>
                         <div>复盘卡</div><div>{{ log.beforeSummary.reviewCards }}</div><div>{{ log.afterSummary.reviewCards }}</div>
+                        <div>处置室</div><div>{{ log.beforeSummary.collabRooms ?? 0 }}</div><div>{{ log.afterSummary.collabRooms ?? 0 }}</div>
                       </div>
                     </div>
                     <div v-if="log.conflicts" class="log-conflicts">
@@ -967,6 +1063,13 @@
           <button @click="editItem" class="btn btn-primary" v-if="canEditItem">✏️ 编辑</button>
           <button @click="startProcessing" class="btn btn-warning" v-if="canStartProcessing">🔄 开始处理</button>
           <button @click="submitForConfirm" class="btn btn-info" v-if="canSubmitForConfirm">📨 提交待确认</button>
+          <button v-if="canCreateCollabFromItem && getActiveCollabByItemId(selectedItem?.id)"
+                  @click="jumpToCollabRoom(getActiveCollabByItemId(selectedItem?.id))" class="btn btn-success">
+            🚨 查看关联处置室
+          </button>
+          <button v-else-if="canCreateCollabFromItem" @click="openCreateCollabRoomFromItem(selectedItem)" class="btn btn-success">
+            🚨 拉起处置室
+          </button>
           <button @click="showCloseModal = true" class="btn btn-danger" v-if="canCloseItem">❌ 关闭</button>
           <button @click="showDetailModal = false" class="btn btn-outline">关闭</button>
         </div>
@@ -1452,6 +1555,382 @@
           <button @click="cancelExceptionImport" class="btn btn-outline">取消</button>
           <button @click="confirmExceptionImport" class="btn btn-success" :disabled="!exceptionImportPreview?.permissionCheck?.allowed">
             ✅ 确认导入（{{ exceptionImportPreview ? (exceptionImportPreview.summary.newCount + exceptionImportPreview.summary.overwriteCount) : 0 }}项）
+          </button>
+        </div>
+      </div>
+    </div>
+
+    <!-- 创建处置室弹窗 -->
+    <div v-if="showCreateCollabModal" class="modal-overlay" @click.self="showCreateCollabModal = false">
+      <div class="modal modal-large">
+        <div class="modal-header">
+          <h3>🚨 创建协同处置室</h3>
+          <button class="modal-close" @click="showCreateCollabModal = false">×</button>
+        </div>
+        <div class="modal-body">
+          <div v-if="collabForm.sourceItemTitle" class="alert alert-info" style="margin-bottom:16px;">
+            📋 从看板事项拉起：<b>{{ collabForm.sourceItemTitle }}</b>
+          </div>
+          <div class="form-row">
+            <label>处置室标题 <span class="required-mark">*</span></label>
+            <input v-model="collabForm.title" class="input-text" placeholder="填写处置室标题，如：核心数据库异常处置">
+          </div>
+          <div class="form-row">
+            <label>事件级别 <span class="required-mark">*</span></label>
+            <select v-model="collabForm.level" class="input-select">
+              <option value="">请选择级别</option>
+              <option value="urgent">紧急（P0）</option>
+              <option value="high">高（P1）</option>
+              <option value="medium">中（P2）</option>
+              <option value="low">低（P3）</option>
+            </select>
+          </div>
+          <div class="form-row">
+            <label>影响范围</label>
+            <textarea v-model="collabForm.impactScope" class="input-textarea" rows="2" placeholder="描述影响范围，如：影响华东区域交易系统、涉及订单服务"></textarea>
+          </div>
+          <div class="form-row">
+            <label>处置目标</label>
+            <textarea v-model="collabForm.target" class="input-textarea" rows="2" placeholder="描述处置目标，如：2小时内恢复服务、定位根因并修复"></textarea>
+          </div>
+          <div class="form-row">
+            <label>截止时间</label>
+            <input v-model="collabForm.deadline" type="datetime-local" class="input-text">
+          </div>
+          <div class="form-row">
+            <label>参与人 <span class="required-mark">*</span>（至少选择1人）</label>
+            <div class="participant-checkboxes">
+              <label v-for="user in users" :key="user.id" class="checkbox-item"
+                     :class="{ disabled: !canSelectAsParticipant(user) }">
+                <input type="checkbox" :value="user.id" v-model="collabForm.selectedUserIds"
+                       :disabled="!canSelectAsParticipant(user)">
+                {{ user.name }}（{{ getRoleName(user.roleId) }}）
+              </label>
+            </div>
+            <div v-if="collabForm.selectedUserIds.length === 0" class="form-error">请至少选择一位参与人</div>
+          </div>
+        </div>
+        <div class="modal-footer">
+          <button @click="showCreateCollabModal = false" class="btn btn-outline">取消</button>
+          <button @click="createCollabRoom" class="btn btn-primary">🚨 创建处置室</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- 处置室详情弹窗 -->
+    <div v-if="showCollabDetailModal" class="modal-overlay" @click.self="closeCollabDetailModal">
+      <div class="modal modal-extra-large">
+        <div class="modal-header">
+          <div style="display:flex;align-items:center;gap:10px;">
+            <h3 style="margin:0;">🚨 {{ selectedCollabRoom?.title || '处置室详情' }}</h3>
+            <span class="dispatch-status-badge" :class="selectedCollabRoom?.status === 'closed' ? 'status-closed' : 'status-active'">
+              {{ selectedCollabRoom?.status === 'closed' ? '已关闭' : '进行中' }}
+            </span>
+            <span class="dispatch-level-badge" :class="'level-badge-' + selectedCollabRoom?.level">
+              {{ getDispatchLevelName(selectedCollabRoom?.level) }}
+            </span>
+            <span class="dispatch-version-detail">v{{ selectedCollabRoom?.version }}</span>
+          </div>
+          <div style="display:flex;align-items:center;gap:8px;">
+            <button v-if="selectedCollabRoom && canExportCollabRoom(selectedCollabRoom)"
+                    @click="exportCollabRoom('json')" class="btn btn-outline btn-sm">📄 JSON</button>
+            <button v-if="selectedCollabRoom && canExportCollabRoom(selectedCollabRoom)"
+                    @click="exportCollabRoom('csv')" class="btn btn-outline btn-sm">📊 CSV</button>
+            <button class="modal-close" @click="closeCollabDetailModal">×</button>
+          </div>
+        </div>
+        <div v-if="selectedCollabRoom" class="modal-body collab-detail-body">
+          <div class="collab-detail-main">
+            <div class="detail-section">
+              <div class="detail-info-grid">
+                <div v-if="selectedCollabRoom.sourceItemTitle" class="detail-info-item">
+                  <span class="detail-label">📋 关联事项：</span>
+                  <span class="detail-value">{{ selectedCollabRoom.sourceItemTitle }}</span>
+                </div>
+                <div class="detail-info-item">
+                  <span class="detail-label">👤 创建人：</span>
+                  <span class="detail-value">{{ selectedCollabRoom.creatorName }}</span>
+                </div>
+                <div class="detail-info-item">
+                  <span class="detail-label">⏱️ 创建时间：</span>
+                  <span class="detail-value">{{ formatTime(selectedCollabRoom.createTime) }}</span>
+                </div>
+                <div class="detail-info-item">
+                  <span class="detail-label">🔄 更新时间：</span>
+                  <span class="detail-value">{{ formatTime(selectedCollabRoom.updateTime) }}</span>
+                </div>
+                <div v-if="selectedCollabRoom.deadline" class="detail-info-item" :class="{ 'overdue-text': isDispatchOverdue(selectedCollabRoom) }">
+                  <span class="detail-label">⏰ 截止时间：</span>
+                  <span class="detail-value">{{ selectedCollabRoom.deadline }}{{ isDispatchOverdue(selectedCollabRoom) ? '（已逾期）' : '' }}</span>
+                </div>
+                <div v-if="selectedCollabRoom.status === 'closed'" class="detail-info-item">
+                  <span class="detail-label">🛑 关闭时间：</span>
+                  <span class="detail-value">{{ formatTime(selectedCollabRoom.closeTime) }}</span>
+                </div>
+              </div>
+              <div v-if="selectedCollabRoom.impactScope" class="detail-block">
+                <div class="detail-block-label">🌐 影响范围</div>
+                <div class="detail-block-content">{{ selectedCollabRoom.impactScope }}</div>
+              </div>
+              <div v-if="selectedCollabRoom.target" class="detail-block">
+                <div class="detail-block-label">🎯 处置目标</div>
+                <div class="detail-block-content">{{ selectedCollabRoom.target }}</div>
+              </div>
+              <div v-if="selectedCollabRoom.status === 'closed' && selectedCollabRoom.closeReason" class="detail-block">
+                <div class="detail-block-label">🛑 关闭原因</div>
+                <div class="detail-block-content">{{ selectedCollabRoom.closeReason }}</div>
+              </div>
+            </div>
+
+            <!-- 成员列表 -->
+            <div class="detail-section">
+              <div class="section-title-row">
+                <h4>👥 参与人（{{ selectedCollabRoom.participants.length }}人）
+                  <button v-if="canManageCollabMembers(selectedCollabRoom)" @click="isEditingMembers = true" class="btn btn-sm btn-outline" style="margin-left:8px;">
+                    ✏️ 调整成员
+                  </button>
+                </h4>
+              </div>
+              <div v-if="isEditingMembers" class="member-edit-area">
+                <div class="participant-checkboxes">
+                  <label v-for="user in users" :key="user.id" class="checkbox-item">
+                    <input type="checkbox" :value="user.id" v-model="memberEditUserIds">
+                    {{ user.name }}（{{ getRoleName(user.roleId) }}）
+                  </label>
+                </div>
+                <div class="member-edit-actions">
+                  <button @click="cancelMemberEdit" class="btn btn-outline btn-sm">取消</button>
+                  <button @click="saveMemberChanges" class="btn btn-primary btn-sm">保存调整</button>
+                </div>
+              </div>
+              <div v-else class="participants-list">
+                <div v-for="p in selectedCollabRoom.participants" :key="p.userId" class="participant-item">
+                  <div class="participant-avatar">{{ p.name.charAt(0) }}</div>
+                  <div class="participant-info">
+                    <div class="participant-name">{{ p.name }}</div>
+                    <div class="participant-role">{{ p.roleName }} · 加入 {{ formatTime(p.joinTime) }}</div>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <!-- 待确认问题 -->
+            <div v-if="selectedCollabRoom.pendingQuestions && selectedCollabRoom.pendingQuestions.length > 0" class="detail-section">
+              <h4>❓ 待确认问题（{{ selectedCollabRoom.pendingQuestions.filter(q=>!q.answered).length }}/{{ selectedCollabRoom.pendingQuestions.length }}未答复）</h4>
+              <div v-for="q in selectedCollabRoom.pendingQuestions" :key="q.id" class="question-item">
+                <div class="question-header">
+                  <span class="question-status-badge" :class="q.answered ? 'status-done' : 'status-pending'">
+                    {{ q.answered ? '✅ 已答复' : '⏳ 待答复' }}
+                  </span>
+                  <span class="question-meta">{{ q.operatorName }} · {{ formatTime(q.time) }}</span>
+                </div>
+                <div class="question-content">❓ {{ q.content }}</div>
+                <div v-if="q.answered" class="question-answer">
+                  ✅ <b>{{ q.answererName }}</b>（{{ formatTime(q.answerTime) }}）：{{ q.answer }}
+                </div>
+                <div v-else-if="canAnswerCollabQuestion(selectedCollabRoom)" class="answer-form">
+                  <textarea v-model="questionAnswerText[q.id] || ''" class="input-textarea" rows="2" placeholder="输入答复内容..."></textarea>
+                  <button @click="submitQuestionAnswer(q.id)" class="btn btn-sm btn-success"
+                          :disabled="!questionAnswerText[q.id] || !questionAnswerText[q.id].trim()">
+                    提交答复
+                  </button>
+                </div>
+              </div>
+            </div>
+
+            <!-- 消息流 -->
+            <div class="detail-section">
+              <h4>💬 消息与进展（{{ selectedCollabRoom.messages.length }}条）</h4>
+              <div v-if="selectedCollabRoom.messages.length === 0" class="empty-state empty-small">
+                暂无消息，参与人可在下方补充进展。
+              </div>
+              <div v-else class="messages-flow">
+                <div v-for="msg in selectedCollabRoom.messages" :key="msg.id"
+                     class="message-item" :class="'message-type-' + msg.type">
+                  <div class="message-avatar">{{ msg.operatorName.charAt(0) }}</div>
+                  <div class="message-body">
+                    <div class="message-header">
+                      <span class="message-sender">{{ msg.operatorName }}</span>
+                      <span class="message-type-tag">
+                        {{ msg.type === 'progress' ? '📈 进展' : msg.type === 'question' ? '❓ 提问' : msg.type === 'answer' ? '✅ 答复' : '消息' }}
+                      </span>
+                      <span class="message-time">{{ formatTime(msg.time) }}</span>
+                    </div>
+                    <div class="message-content">{{ msg.content }}</div>
+                    <div v-if="msg.attachments && msg.attachments.length > 0" class="message-attachments">
+                      <div v-for="(att, idx) in msg.attachments" :key="idx" class="attachment-item">
+                        📎 <b>{{ att.name }}</b>（{{ att.size || (att.content ? att.content.length + '字符' : '0') }}）
+                        <div class="attachment-preview">{{ att.content }}</div>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <!-- 输入区域 -->
+            <div v-if="canAddCollabMessage(selectedCollabRoom)" class="message-input-area">
+              <div class="message-tabs">
+                <button @click="activeMessageTab = 'progress'" class="btn btn-sm"
+                        :class="activeMessageTab === 'progress' ? 'btn-primary' : 'btn-outline'">
+                  📈 补充进展
+                </button>
+                <button @click="activeMessageTab = 'question'" class="btn btn-sm"
+                        :class="activeMessageTab === 'question' ? 'btn-primary' : 'btn-outline'">
+                  ❓ 提待确认问题
+                </button>
+              </div>
+              <div v-if="activeMessageTab === 'progress'" class="progress-input">
+                <textarea v-model="progressInputText" class="input-textarea" rows="3"
+                          placeholder="补充处置进展，如：已重启服务、正在排查数据库连接池..."></textarea>
+                <div class="attachment-upload-area">
+                  <button @click="addAttachmentToProgress" class="btn btn-sm btn-outline">📎 添加文字附件</button>
+                  <div v-for="(att, idx) in progressAttachments" :key="idx" class="attachment-item-inline">
+                    📎 {{ att.name }}（{{ att.content ? att.content.length : 0 }}字符）
+                    <button @click="progressAttachments.splice(idx, 1)" class="btn-link-remove">移除</button>
+                  </div>
+                </div>
+                <div class="input-actions-row">
+                  <span class="text-muted" style="font-size:12px;">仅自己和其他参与人可见</span>
+                  <button @click="submitProgress" class="btn btn-primary"
+                          :disabled="!progressInputText || !progressInputText.trim()">
+                    📈 提交进展
+                  </button>
+                </div>
+              </div>
+              <div v-else class="question-input">
+                <textarea v-model="questionInputText" class="input-textarea" rows="3"
+                          placeholder="提出需要班长或创建者确认的问题..."></textarea>
+                <div class="input-actions-row">
+                  <span class="text-muted" style="font-size:12px;">提交后将列入待确认问题清单</span>
+                  <button @click="submitQuestion" class="btn btn-warning"
+                          :disabled="!questionInputText || !questionInputText.trim()">
+                    ❓ 提交问题
+                  </button>
+                </div>
+              </div>
+            </div>
+            <div v-else-if="selectedCollabRoom.status === 'closed'" class="empty-state empty-small">
+              🛑 处置室已关闭，无法继续操作。
+            </div>
+            <div v-else class="empty-state empty-small">
+              🔒 仅处置室参与人可补充进展或提出问题。
+            </div>
+          </div>
+
+          <div class="collab-detail-sidebar">
+            <!-- 操作日志时间线 -->
+            <div class="detail-section">
+              <h4>📜 操作日志</h4>
+              <div v-if="selectedCollabRoom.logs.length === 0" class="empty-state empty-small">暂无日志</div>
+              <div v-else class="logs-timeline">
+                <div v-for="log in selectedCollabRoom.logs.slice().reverse()" :key="log.id" class="log-item">
+                  <div class="log-dot"></div>
+                  <div class="log-content">
+                    <div class="log-action">{{ log.action }}</div>
+                    <div v-if="log.detail" class="log-detail">{{ log.detail }}</div>
+                    <div class="log-meta">{{ log.operatorName }} · {{ formatTime(log.time) }}</div>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <!-- 管理操作 -->
+            <div v-if="canEditCollabBasic(selectedCollabRoom) || canCloseCollabRoom(selectedCollabRoom) || (selectedCollabRoom.status === 'closed' && isAdminRole)"
+                 class="detail-section">
+              <h4>⚙️ 管理操作</h4>
+              <div v-if="canEditCollabBasic(selectedCollabRoom)" style="margin-bottom:12px;">
+                <button @click="isEditingBasic = true" class="btn btn-outline btn-sm" style="width:100%;">✏️ 修改基本信息</button>
+              </div>
+              <div v-if="isEditingBasic" class="basic-edit-form">
+                <div class="form-row" style="margin-bottom:8px;">
+                  <label>标题</label>
+                  <input v-model="basicEditForm.title" class="input-text">
+                </div>
+                <div class="form-row" style="margin-bottom:8px;">
+                  <label>级别</label>
+                  <select v-model="basicEditForm.level" class="input-select">
+                    <option value="urgent">紧急</option>
+                    <option value="high">高</option>
+                    <option value="medium">中</option>
+                    <option value="low">低</option>
+                  </select>
+                </div>
+                <div class="form-row" style="margin-bottom:8px;">
+                  <label>影响范围</label>
+                  <textarea v-model="basicEditForm.impactScope" class="input-textarea" rows="2"></textarea>
+                </div>
+                <div class="form-row" style="margin-bottom:8px;">
+                  <label>处置目标</label>
+                  <textarea v-model="basicEditForm.target" class="input-textarea" rows="2"></textarea>
+                </div>
+                <div class="form-row" style="margin-bottom:8px;">
+                  <label>截止时间</label>
+                  <input v-model="basicEditForm.deadline" type="datetime-local" class="input-text">
+                </div>
+                <div class="input-actions-row">
+                  <button @click="isEditingBasic = false" class="btn btn-outline btn-sm">取消</button>
+                  <button @click="saveBasicChanges" class="btn btn-primary btn-sm">保存</button>
+                </div>
+              </div>
+              <div v-if="canCloseCollabRoom(selectedCollabRoom)" style="margin-bottom:8px;">
+                <button @click="showCloseCollabModal = true" class="btn btn-danger btn-sm" style="width:100%;">🛑 关闭处置室</button>
+              </div>
+              <div v-if="selectedCollabRoom.status === 'closed' && isAdminRole" style="margin-bottom:8px;">
+                <button @click="reopenCollabRoom" class="btn btn-warning btn-sm" style="width:100%;">🔓 重新开启</button>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- 关闭处置室弹窗 -->
+    <div v-if="showCloseCollabModal" class="modal-overlay" @click.self="showCloseCollabModal = false">
+      <div class="modal">
+        <div class="modal-header">
+          <h3>🛑 关闭处置室</h3>
+          <button class="modal-close" @click="showCloseCollabModal = false">×</button>
+        </div>
+        <div class="modal-body">
+          <div class="form-row">
+            <label>关闭原因</label>
+            <textarea v-model="closeCollabReason" class="input-textarea" rows="3" placeholder="请说明关闭原因，如：问题已解决、已转由其他机制跟进"></textarea>
+          </div>
+          <div class="alert alert-warning">
+            ⚠️ 关闭后所有参与人将无法继续补充进展、调整成员或提问。班长可重新开启。
+          </div>
+        </div>
+        <div class="modal-footer">
+          <button @click="showCloseCollabModal = false" class="btn btn-outline">取消</button>
+          <button @click="confirmCloseCollabRoom" class="btn btn-danger">🛑 确认关闭</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- 添加文字附件弹窗 -->
+    <div v-if="showAttachmentModal" class="modal-overlay" @click.self="showAttachmentModal = false">
+      <div class="modal">
+        <div class="modal-header">
+          <h3>📎 添加文字附件</h3>
+          <button class="modal-close" @click="showAttachmentModal = false">×</button>
+        </div>
+        <div class="modal-body">
+          <div class="form-row">
+            <label>附件名称</label>
+            <input v-model="newAttachment.name" class="input-text" placeholder="如：排查过程.txt、错误日志.txt">
+          </div>
+          <div class="form-row">
+            <label>附件内容（文字）</label>
+            <textarea v-model="newAttachment.content" class="input-textarea" rows="6"
+                      placeholder="粘贴或输入要保存的文字内容，如错误堆栈、配置项、排查记录等"></textarea>
+          </div>
+        </div>
+        <div class="modal-footer">
+          <button @click="showAttachmentModal = false" class="btn btn-outline">取消</button>
+          <button @click="confirmAddAttachment" class="btn btn-primary"
+                  :disabled="!newAttachment.name || !newAttachment.name.trim() || !newAttachment.content || !newAttachment.content.trim()">
+            ✅ 添加附件
           </button>
         </div>
       </div>

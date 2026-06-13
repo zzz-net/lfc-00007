@@ -15,6 +15,47 @@ createApp({
     const reviewCards = ref([]);
     const checklistTemplates = ref([]);
     const checklistRecords = ref([]);
+    const collabRooms = ref([]);
+
+    // ========== 处置室相关 ==========
+    const showCreateCollabModal = ref(false);
+    const showCollabDetailModal = ref(false);
+    const showCloseCollabModal = ref(false);
+    const showAttachmentModal = ref(false);
+    const selectedCollabRoom = ref(null);
+    const collabDetailBaseVersion = ref(0);
+    const collabForm = reactive({
+      sourceItemId: '',
+      sourceItemTitle: '',
+      title: '',
+      level: '',
+      impactScope: '',
+      target: '',
+      deadline: '',
+      selectedUserIds: []
+    });
+    const dispatchFilter = reactive({
+      status: '',
+      level: '',
+      participantId: ''
+    });
+    const isEditingMembers = ref(false);
+    const memberEditUserIds = ref([]);
+    const isEditingBasic = ref(false);
+    const basicEditForm = reactive({
+      title: '',
+      level: 'medium',
+      impactScope: '',
+      target: '',
+      deadline: ''
+    });
+    const closeCollabReason = ref('');
+    const activeMessageTab = ref('progress');
+    const progressInputText = ref('');
+    const questionInputText = ref('');
+    const progressAttachments = ref([]);
+    const newAttachment = reactive({ name: '', content: '' });
+    const questionAnswerText = reactive({});
 
     const currentShiftId = ref('');
     const currentShiftDate = ref('');
@@ -272,6 +313,7 @@ createApp({
       reviewCards.value = Store.ReviewCards.getAll();
       checklistTemplates.value = Store.ChecklistTemplates.getAll();
       checklistRecords.value = Store.ChecklistRecords.getAll();
+      collabRooms.value = Store.CollabRooms.getAll();
 
       const currentShiftData = Store.CurrentShift.get();
       currentShiftId.value = currentShiftData.shiftId || '';
@@ -1650,6 +1692,399 @@ createApp({
       return map[action] || action;
     }
 
+    // ========== 处置室：计算属性 ==========
+    const filteredCollabRooms = computed(() => {
+      let list = collabRooms.value.slice();
+      if (dispatchFilter.status) {
+        list = list.filter(r => r.status === dispatchFilter.status);
+      }
+      if (dispatchFilter.level) {
+        list = list.filter(r => r.level === dispatchFilter.level);
+      }
+      if (dispatchFilter.participantId) {
+        list = list.filter(r => r.participants.some(p => p.userId === dispatchFilter.participantId));
+      }
+      list.sort((a, b) => {
+        if (a.status !== b.status) return a.status === 'active' ? -1 : 1;
+        return b.updateTime - a.updateTime;
+      });
+      return list;
+    });
+    const isAdminRole = computed(() => {
+      if (!currentUser.value) return false;
+      const role = roles.value.find(r => r.id === currentUser.value.roleId);
+      return role && (role.id === 'role_admin' || role.canManageConfig === true);
+    });
+    const canCreateCollabFromItem = computed(() => {
+      if (!currentUser.value) return false;
+      const role = roles.value.find(r => r.id === currentUser.value.roleId);
+      return role && role.canCreate;
+    });
+
+    // ========== 处置室：工具方法 ==========
+    function reloadCollabRooms() {
+      collabRooms.value = Store.CollabRooms.getAll();
+    }
+    function refreshSelectedCollabRoom() {
+      if (!selectedCollabRoom.value) return;
+      const fresh = Store.CollabRooms.getById(selectedCollabRoom.value.id);
+      if (fresh) {
+        selectedCollabRoom.value = JSON.parse(JSON.stringify(fresh));
+        collabDetailBaseVersion.value = fresh.version;
+      }
+    }
+    function getDispatchLevelName(level) {
+      return Store.CollabRooms.LEVELS[level]?.name || level || '-';
+    }
+    function isDispatchOverdue(room) {
+      if (!room || !room.deadline) return false;
+      const dl = new Date(room.deadline).getTime();
+      return !isNaN(dl) && Date.now() > dl && room.status === 'active';
+    }
+    function canSelectAsParticipant(user) {
+      if (!user) return false;
+      const role = roles.value.find(r => r.id === user.roleId);
+      if (!role) return true;
+      return role.canCreate || role.canProcess || role.canConfirm || role.canManageConfig;
+    }
+    function _buildParticipantsFromIds(ids) {
+      return ids
+        .map(id => users.value.find(u => u.id === id))
+        .filter(Boolean)
+        .map(u => ({
+          userId: u.id,
+          name: u.name,
+          roleId: u.roleId,
+          roleName: getRoleName(u.roleId)
+        }));
+    }
+    function getActiveCollabByItemId(itemId) {
+      if (!itemId) return null;
+      return Store.CollabRooms.getActiveBySourceItemId(itemId);
+    }
+
+    // ========== 处置室：列表筛选 ==========
+    function resetDispatchFilter() {
+      dispatchFilter.status = '';
+      dispatchFilter.level = '';
+      dispatchFilter.participantId = '';
+    }
+
+    // ========== 处置室：创建 ==========
+    function _resetCollabForm() {
+      collabForm.sourceItemId = '';
+      collabForm.sourceItemTitle = '';
+      collabForm.title = '';
+      collabForm.level = '';
+      collabForm.impactScope = '';
+      collabForm.target = '';
+      collabForm.deadline = '';
+      collabForm.selectedUserIds = [];
+    }
+    function openCreateCollabRoom() {
+      _resetCollabForm();
+      showCreateCollabModal.value = true;
+    }
+    function openCreateCollabRoomFromItem(item) {
+      if (!item) return;
+      _resetCollabForm();
+      collabForm.sourceItemId = item.id;
+      collabForm.sourceItemTitle = item.title;
+      collabForm.title = item.title + ' - 协同处置';
+      const existing = getActiveCollabByItemId(item.id);
+      if (existing) {
+        showToast('该事项已有关联的进行中处置室，已为您打开', 'warning');
+        showDetailModal.value = false;
+        openCollabRoomDetail(existing);
+        return;
+      }
+      if (currentUser.value && canSelectAsParticipant(currentUser.value)) {
+        collabForm.selectedUserIds.push(currentUser.value.id);
+      }
+      showDetailModal.value = false;
+      showCreateCollabModal.value = true;
+    }
+    function createCollabRoom() {
+      if (!currentUser.value) { showToast('请先选择当前用户', 'warning'); return; }
+      if (!collabForm.title.trim()) { showToast('请填写处置室标题', 'warning'); return; }
+      if (!collabForm.level) { showToast('请选择事件级别', 'warning'); return; }
+      if (collabForm.selectedUserIds.length === 0) { showToast('请至少选择一位参与人', 'warning'); return; }
+      const operator = currentUser.value;
+      const result = Store.CollabRooms.create({
+        sourceItemId: collabForm.sourceItemId,
+        sourceItemTitle: collabForm.sourceItemTitle,
+        title: collabForm.title,
+        level: collabForm.level,
+        impactScope: collabForm.impactScope,
+        target: collabForm.target,
+        deadline: collabForm.deadline,
+        participants: _buildParticipantsFromIds(collabForm.selectedUserIds)
+      }, operator);
+      if (!result.success) {
+        if (result.conflictType === 'duplicate_room' && result.existingRoom) {
+          showToast(result.error, 'warning');
+          showCreateCollabModal.value = false;
+          openCollabRoomDetail(result.existingRoom);
+          return;
+        }
+        showToast(result.error, 'error');
+        return;
+      }
+      showToast('处置室创建成功', 'success');
+      showCreateCollabModal.value = false;
+      reloadCollabRooms();
+      activeTab.value = 'dispatch_room';
+      openCollabRoomDetail(result.room);
+    }
+
+    // ========== 处置室：详情打开与操作 ==========
+    function openCollabRoomDetail(room) {
+      if (!room) return;
+      const fresh = Store.CollabRooms.getById(room.id);
+      if (!fresh) { showToast('处置室不存在或已被删除', 'error'); return; }
+      selectedCollabRoom.value = JSON.parse(JSON.stringify(fresh));
+      collabDetailBaseVersion.value = fresh.version;
+      isEditingMembers.value = false;
+      isEditingBasic.value = false;
+      memberEditUserIds.value = fresh.participants.map(p => p.userId);
+      basicEditForm.title = fresh.title;
+      basicEditForm.level = fresh.level;
+      basicEditForm.impactScope = fresh.impactScope;
+      basicEditForm.target = fresh.target;
+      basicEditForm.deadline = fresh.deadline || '';
+      progressInputText.value = '';
+      questionInputText.value = '';
+      progressAttachments.value = [];
+      Object.keys(questionAnswerText).forEach(k => delete questionAnswerText[k]);
+      showCollabDetailModal.value = true;
+    }
+    function closeCollabDetailModal() {
+      showCollabDetailModal.value = false;
+      selectedCollabRoom.value = null;
+    }
+    function jumpToCollabRoom(room) {
+      if (!room) return;
+      activeTab.value = 'dispatch_room';
+      if (showDetailModal.value) showDetailModal.value = false;
+      openCollabRoomDetail(room);
+    }
+
+    // ========== 处置室：权限判断 ==========
+    function canAddCollabMessage(room) {
+      if (!room || !currentUser.value) return false;
+      return Store.CollabRooms.canAddMessage(room, currentUser.value);
+    }
+    function canManageCollabMembers(room) {
+      if (!room || !currentUser.value) return false;
+      return Store.CollabRooms.canManageMembers(room, currentUser.value);
+    }
+    function canCloseCollabRoom(room) {
+      if (!room || !currentUser.value) return false;
+      return Store.CollabRooms.canClose(room, currentUser.value);
+    }
+    function canEditCollabBasic(room) {
+      if (!room || !currentUser.value) return false;
+      return Store.CollabRooms.canEditBasic(room, currentUser.value);
+    }
+    function canAnswerCollabQuestion(room) {
+      if (!room || !currentUser.value) return false;
+      if (room.status === 'closed') return false;
+      return isAdminRole.value || room.creatorId === currentUser.value.id;
+    }
+    function canExportCollabRoom(room) {
+      if (!room || !currentUser.value) return false;
+      return room.participants.some(p => p.userId === currentUser.value.id) || isAdminRole.value;
+    }
+
+    // ========== 处置室：成员调整 ==========
+    function cancelMemberEdit() {
+      isEditingMembers.value = false;
+      if (selectedCollabRoom.value) {
+        memberEditUserIds.value = selectedCollabRoom.value.participants.map(p => p.userId);
+      }
+    }
+    function saveMemberChanges() {
+      if (!selectedCollabRoom.value) return;
+      const operator = currentUser.value;
+      const result = Store.CollabRooms.update(
+        selectedCollabRoom.value.id,
+        { participants: _buildParticipantsFromIds(memberEditUserIds.value) },
+        operator,
+        collabDetailBaseVersion.value
+      );
+      _handleDispatchUpdateResult(result, '成员调整成功');
+    }
+
+    // ========== 处置室：基本信息修改 ==========
+    function saveBasicChanges() {
+      if (!selectedCollabRoom.value) return;
+      const operator = currentUser.value;
+      const updateData = {
+        title: basicEditForm.title,
+        level: basicEditForm.level,
+        impactScope: basicEditForm.impactScope,
+        target: basicEditForm.target,
+        deadline: basicEditForm.deadline
+      };
+      const result = Store.CollabRooms.update(
+        selectedCollabRoom.value.id,
+        updateData,
+        operator,
+        collabDetailBaseVersion.value
+      );
+      _handleDispatchUpdateResult(result, '修改成功');
+      if (result.success) isEditingBasic.value = false;
+    }
+
+    // ========== 处置室：关闭/重新开启 ==========
+    function confirmCloseCollabRoom() {
+      if (!selectedCollabRoom.value) return;
+      const operator = currentUser.value;
+      const result = Store.CollabRooms.close(
+        selectedCollabRoom.value.id,
+        operator,
+        closeCollabReason.value,
+        collabDetailBaseVersion.value
+      );
+      _handleDispatchUpdateResult(result, '处置室已关闭');
+      if (result.success) {
+        showCloseCollabModal.value = false;
+        closeCollabReason.value = '';
+      }
+    }
+    function reopenCollabRoom() {
+      if (!selectedCollabRoom.value) return;
+      const operator = currentUser.value;
+      const result = Store.CollabRooms.reopen(selectedCollabRoom.value.id, operator);
+      _handleDispatchUpdateResult(result, '处置室已重新开启');
+    }
+
+    // ========== 处置室：进展/问题提交 ==========
+    function addAttachmentToProgress() {
+      newAttachment.name = '';
+      newAttachment.content = '';
+      showAttachmentModal.value = true;
+    }
+    function confirmAddAttachment() {
+      if (!newAttachment.name || !newAttachment.name.trim() || !newAttachment.content || !newAttachment.content.trim()) {
+        showToast('请填写附件名称和内容', 'warning');
+        return;
+      }
+      progressAttachments.value.push({
+        name: newAttachment.name.trim(),
+        content: newAttachment.content.trim(),
+        size: newAttachment.content.trim().length
+      });
+      showAttachmentModal.value = false;
+    }
+    function submitProgress() {
+      if (!selectedCollabRoom.value) return;
+      if (!progressInputText.value || !progressInputText.value.trim()) {
+        showToast('请输入进展内容', 'warning');
+        return;
+      }
+      const operator = currentUser.value;
+      const result = Store.CollabRooms.addProgress(
+        selectedCollabRoom.value.id,
+        progressInputText.value,
+        JSON.parse(JSON.stringify(progressAttachments.value)),
+        operator
+      );
+      _handleDispatchUpdateResult(result, '进展提交成功');
+      if (result.success) {
+        progressInputText.value = '';
+        progressAttachments.value = [];
+      }
+    }
+    function submitQuestion() {
+      if (!selectedCollabRoom.value) return;
+      if (!questionInputText.value || !questionInputText.value.trim()) {
+        showToast('请输入问题内容', 'warning');
+        return;
+      }
+      const operator = currentUser.value;
+      const result = Store.CollabRooms.addQuestion(
+        selectedCollabRoom.value.id,
+        questionInputText.value,
+        operator
+      );
+      _handleDispatchUpdateResult(result, '问题已提交');
+      if (result.success) questionInputText.value = '';
+    }
+    function submitQuestionAnswer(qid) {
+      if (!selectedCollabRoom.value) return;
+      const text = questionAnswerText[qid];
+      if (!text || !text.trim()) { showToast('请输入答复内容', 'warning'); return; }
+      const operator = currentUser.value;
+      const result = Store.CollabRooms.answerQuestion(
+        selectedCollabRoom.value.id,
+        qid,
+        text,
+        operator
+      );
+      _handleDispatchUpdateResult(result, '答复成功');
+      if (result.success) delete questionAnswerText[qid];
+    }
+
+    // ========== 处置室：通用结果处理（含冲突/权限/已关闭提示） ==========
+    function _handleDispatchUpdateResult(result, successMsg) {
+      if (!result) return;
+      if (result.success) {
+        if (successMsg) showToast(successMsg, 'success');
+        reloadCollabRooms();
+        refreshSelectedCollabRoom();
+        return;
+      }
+      if (result.conflictType === 'version') {
+        showToast(result.error + '，已为您刷新到最新版本', 'error');
+        if (result.latestRoom) {
+          selectedCollabRoom.value = JSON.parse(JSON.stringify(result.latestRoom));
+          collabDetailBaseVersion.value = result.latestRoom.version;
+          memberEditUserIds.value = result.latestRoom.participants.map(p => p.userId);
+        }
+        return;
+      }
+      if (result.conflictType === 'closed') {
+        showToast(result.error, 'warning');
+        refreshSelectedCollabRoom();
+        return;
+      }
+      if (result.conflictType === 'permission') {
+        showToast(result.error, 'error');
+        refreshSelectedCollabRoom();
+        return;
+      }
+      showToast(result.error || '操作失败', 'error');
+    }
+
+    // ========== 处置室：导出 ==========
+    function exportCollabRoom(format) {
+      if (!selectedCollabRoom.value) return;
+      if (format === 'json') {
+        const result = Store.CollabRooms.exportJSON(selectedCollabRoom.value.id);
+        if (!result.success) { showToast(result.error, 'error'); return; }
+        const jsonStr = JSON.stringify(result.data, null, 2);
+        downloadFile(jsonStr, `处置室-${result.data.title || 'summary'}.json`, 'application/json');
+        showToast('已导出 JSON 摘要', 'success');
+      } else if (format === 'csv') {
+        const result = Store.CollabRooms.exportCSV(selectedCollabRoom.value.id);
+        if (!result.success) { showToast(result.error, 'error'); return; }
+        downloadFile(result.csv, `处置室-${result.filename || 'summary'}.csv`, 'text/csv');
+        showToast('已导出 CSV 摘要', 'success');
+      }
+    }
+    function downloadFile(content, filename, mimeType) {
+      const blob = new Blob([content], { type: (mimeType || 'application/octet-stream') + ';charset=utf-8' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = filename;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+    }
+
     return {
       activeTab,
       configTab,
@@ -1816,7 +2251,60 @@ createApp({
       previewExceptionHandoverImport,
       cancelExceptionImport,
       confirmExceptionImport,
-      getExceptionActionName
+      getExceptionActionName,
+
+      // ========== 处置室 ==========
+      collabRooms,
+      dispatchFilter,
+      filteredCollabRooms,
+      isAdminRole,
+      canCreateCollabFromItem,
+      showCreateCollabModal,
+      showCollabDetailModal,
+      showCloseCollabModal,
+      showAttachmentModal,
+      selectedCollabRoom,
+      collabForm,
+      isEditingMembers,
+      memberEditUserIds,
+      isEditingBasic,
+      basicEditForm,
+      closeCollabReason,
+      activeMessageTab,
+      progressInputText,
+      questionInputText,
+      progressAttachments,
+      newAttachment,
+      questionAnswerText,
+
+      getDispatchLevelName,
+      isDispatchOverdue,
+      canSelectAsParticipant,
+      getActiveCollabByItemId,
+      resetDispatchFilter,
+      openCreateCollabRoom,
+      openCreateCollabRoomFromItem,
+      createCollabRoom,
+      openCollabRoomDetail,
+      closeCollabDetailModal,
+      jumpToCollabRoom,
+      canAddCollabMessage,
+      canManageCollabMembers,
+      canCloseCollabRoom,
+      canEditCollabBasic,
+      canAnswerCollabQuestion,
+      canExportCollabRoom,
+      cancelMemberEdit,
+      saveMemberChanges,
+      saveBasicChanges,
+      confirmCloseCollabRoom,
+      reopenCollabRoom,
+      addAttachmentToProgress,
+      confirmAddAttachment,
+      submitProgress,
+      submitQuestion,
+      submitQuestionAnswer,
+      exportCollabRoom
     };
   }
 }).mount('#app');
